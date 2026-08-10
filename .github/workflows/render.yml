@@ -1,4 +1,4 @@
-name: Final Short Test
+name: Shorts Production Render
 
 on:
   workflow_dispatch:
@@ -14,347 +14,714 @@ on:
           - history
           - wars
 
+permissions:
+  contents: read
+
 jobs:
   render:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
+
+      # ============================================================
+      # 1. SETUP
+      # ============================================================
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Read niche
-        run: |
-          NICHE="${{ github.event.inputs.niche }}"
-          if [ -z "$NICHE" ]; then NICHE="science"; fi
-          echo "NICHE=$NICHE" >> "$GITHUB_ENV"
-          echo "Selected niche: $NICHE"
 
       - name: Install system tools
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg espeak-ng
 
-      - name: Install Kokoro
+      - name: Install Python packages
         run: |
           python -m pip install --upgrade pip
-          pip install "kokoro>=0.9.4" soundfile numpy
+          pip install "kokoro>=0.9.4" soundfile numpy requests
 
-      - name: Create script
+      # ============================================================
+      # 2. NICHE
+      # ============================================================
+
+      - name: Set niche
         run: |
+          NICHE="${{ github.event.inputs.niche }}"
+
+          if [ -z "$NICHE" ]; then
+            NICHE="science"
+          fi
+
           case "$NICHE" in
-            technology)
-              cat > script.txt <<'EOF'
-          Technology is changing faster than most people realize.
-          Every year, new inventions completely change how we work and communicate.
-          Artificial intelligence is one of the biggest examples.
-          Modern AI systems can now understand text, analyze images, generate audio, and help solve complex problems.
-          But the most interesting part is not what AI can do today.
-          It is how quickly these capabilities are improving.
-          The technology we consider impressive today may become completely normal in just a few years.
-          That is why understanding new technology early can give us a major advantage.
-          EOF
+            science|technology|history|wars)
               ;;
-
-            history)
-              cat > script.txt <<'EOF'
-          One of the most fascinating things about history is how small events can create enormous consequences.
-          A decision made by a single leader can sometimes change the future of entire nations.
-          Wars, discoveries, inventions, and political changes are often connected in surprising ways.
-          What looks like an isolated event may actually be part of a much larger chain of events.
-          Historians study these connections to understand why civilizations rise, change, and sometimes disappear.
-          And the deeper we look into history, the more complicated the story becomes.
-          EOF
-              ;;
-
-            wars)
-              cat > script.txt <<'EOF'
-          Some of the most important military events in history were decided by technology, strategy, and timing.
-          Armies could have enormous advantages on paper and still lose because their plans failed.
-          Communication, supply lines, intelligence, and geography often mattered just as much as weapons.
-          In many famous battles, a small tactical decision created consequences far beyond the battlefield.
-          That is why military history is not simply about who had the strongest army.
-          It is also about decisions, preparation, information, and the ability to adapt.
-          EOF
-              ;;
-
-            science|*)
-              cat > script.txt <<'EOF'
-          Scientists recently discovered something fascinating about our universe.
-          A strange object deep in space is behaving in a way scientists did not expect.
-          It appears to be producing powerful signals that travel across enormous distances.
-          The surprising part is that these signals repeat in a very unusual pattern.
-          Researchers are now studying whether the pattern can reveal what is happening around the object.
-          This does not mean aliens have been discovered.
-          But it does show us that the universe still contains phenomena we do not fully understand.
-          Every new observation gives scientists another clue.
-          And sometimes, the biggest discoveries begin with something that simply looks strange.
-          EOF
+            *)
+              echo "Invalid niche: $NICHE"
+              exit 1
               ;;
           esac
 
-      - name: Generate voice
+          echo "NICHE=$NICHE" >> "$GITHUB_ENV"
+
+          echo "================================"
+          echo "Selected niche: $NICHE"
+          echo "================================"
+
+      # ============================================================
+      # 3. CREATE SCENE-BASED SCRIPT
+      # ============================================================
+
+      - name: Create scene script
         run: |
-          cat > make_voice.py <<'PY'
-          from kokoro import KPipeline
-          import soundfile as sf
+          mkdir -p scenes
+
+          cat > create_scenes.py <<'PY'
+          import json
+          import os
+
+          niche = os.environ["NICHE"]
+
+          scripts = {
+
+              "science": [
+                  {
+                      "text": "Something in deep space is sending a signal that scientists still cannot fully explain.",
+                      "query": "deep space galaxy telescope stars"
+                  },
+                  {
+                      "text": "The strange part is not simply that the signal exists.",
+                      "query": "radio telescope astronomy observatory"
+                  },
+                  {
+                      "text": "It appears again and again in a pattern that has caught researchers' attention.",
+                      "query": "astronomy scientist telescope research"
+                  },
+                  {
+                      "text": "Astronomers are studying the signal to understand what kind of object could be producing it.",
+                      "query": "astronomer scientist laboratory space research"
+                  },
+                  {
+                      "text": "And there is an important detail: this does not mean scientists have discovered aliens.",
+                      "query": "space telescope night sky stars"
+                  },
+                  {
+                      "text": "It means something in the universe is behaving in a way that our current explanations may not completely describe.",
+                      "query": "mysterious space galaxy universe"
+                  },
+                  {
+                      "text": "That is why unusual signals matter: sometimes the strangest observations become the clues that lead to the next discovery.",
+                      "query": "scientist looking telescope discovery space"
+                  }
+              ],
+
+              "technology": [
+                  {
+                      "text": "The technology that looks impossible today could become completely normal sooner than you think.",
+                      "query": "future technology artificial intelligence computer"
+                  },
+                  {
+                      "text": "Artificial intelligence is already moving beyond simple chat and search.",
+                      "query": "artificial intelligence computer technology"
+                  },
+                  {
+                      "text": "Modern systems can analyze images, understand speech, generate content, and help solve complicated problems.",
+                      "query": "AI technology computer screen laboratory"
+                  },
+                  {
+                      "text": "The surprising part is how quickly these abilities are improving.",
+                      "query": "technology innovation futuristic computer"
+                  },
+                  {
+                      "text": "A capability that seems advanced today can become an ordinary tool surprisingly fast.",
+                      "query": "modern technology smartphone computer"
+                  },
+                  {
+                      "text": "That creates a bigger question: which jobs and industries will change first?",
+                      "query": "future workplace technology people computers"
+                  },
+                  {
+                      "text": "The answer is still developing, but one thing is clear: the technology race is moving faster than most people realize.",
+                      "query": "future technology city digital innovation"
+                  }
+              ],
+
+              "history": [
+                  {
+                      "text": "One small decision in history can sometimes change the future of millions of people.",
+                      "query": "ancient history old documents civilization"
+                  },
+                  {
+                      "text": "What looks like a minor event at the time can become the beginning of a much larger chain of consequences.",
+                      "query": "historical documents old map archive"
+                  },
+                  {
+                      "text": "Leaders make decisions, nations react, and those reactions create new decisions.",
+                      "query": "historical leader painting parliament history"
+                  },
+                  {
+                      "text": "Wars, inventions, discoveries, and political changes are often connected in ways that are easy to miss.",
+                      "query": "history war invention old photographs"
+                  },
+                  {
+                      "text": "That is why historians do more than memorize dates.",
+                      "query": "historian studying old books archive"
+                  },
+                  {
+                      "text": "They look for the connections between events and ask what caused one moment to lead to another.",
+                      "query": "historian research historical documents"
+                  },
+                  {
+                      "text": "And sometimes, following one tiny clue can completely change how we understand the past.",
+                      "query": "ancient artifact archaeological discovery"
+                  }
+              ],
+
+              "wars": [
+                  {
+                      "text": "Some famous battles were not decided by the strongest army.",
+                      "query": "historical battlefield soldiers military"
+                  },
+                  {
+                      "text": "They were decided by information, timing, geography, and the decisions made before the fighting even began.",
+                      "query": "military strategy map planning"
+                  },
+                  {
+                      "text": "An army can have more soldiers and better equipment and still lose if its supply lines collapse.",
+                      "query": "military logistics historical army supplies"
+                  },
+                  {
+                      "text": "Communication can be just as important as weapons because commanders need to know what is happening in real time.",
+                      "query": "military communication radio soldiers"
+                  },
+                  {
+                      "text": "A single tactical mistake can then turn a difficult battle into a disaster.",
+                      "query": "historical battle soldiers battlefield"
+                  },
+                  {
+                      "text": "That is why military history is really a study of decisions, preparation, information, and adaptation.",
+                      "query": "military commander map strategy history"
+                  },
+                  {
+                      "text": "The battlefield shows the result, but the decisions made before it often explain why the result happened.",
+                      "query": "historical military map battlefield"
+                  }
+              ]
+          }
+
+          scenes = scripts[niche]
+
+          with open("scenes.json", "w", encoding="utf-8") as f:
+              json.dump(scenes, f, indent=2, ensure_ascii=False)
+
+          print(f"Created {len(scenes)} scenes for {niche}")
+
+          for i, scene in enumerate(scenes, 1):
+              print(f"{i}: {scene['text']}")
+              print(f"   visual: {scene['query']}")
+          PY
+
+          python create_scenes.py
+
+      # ============================================================
+      # 4. GENERATE VOICE FOR EVERY SCENE
+      # ============================================================
+
+      - name: Generate scene voices
+        run: |
+          cat > generate_voices.py <<'PY'
+          import json
+          import os
           import numpy as np
+          import soundfile as sf
+          from kokoro import KPipeline
 
-          text = open("script.txt", encoding="utf-8").read().strip()
+          scenes = json.load(open("scenes.json", encoding="utf-8"))
+
+          os.makedirs("audio", exist_ok=True)
+
           pipeline = KPipeline(lang_code="a")
-          chunks = []
 
-          for _, _, audio in pipeline(
-              text,
-              voice="af_heart",
-              speed=1.0
-          ):
-              chunks.append(audio)
+          for index, scene in enumerate(scenes, 1):
 
-          if not chunks:
-              raise SystemExit("ERROR: Kokoro produced no audio")
+              text = scene["text"].strip()
 
-          audio = np.concatenate(chunks)
-          sample_rate = 24000
-          minimum_samples = 30 * sample_rate
+              print(f"Generating voice for scene {index}")
+              print(text)
 
-          if len(audio) < minimum_samples:
-              audio = np.pad(
+              chunks = []
+
+              for _, _, audio in pipeline(
+                  text,
+                  voice="af_heart",
+                  speed=1.0
+              ):
+                  chunks.append(audio)
+
+              if not chunks:
+                  raise SystemExit(
+                      f"ERROR: Kokoro produced no audio for scene {index}"
+                  )
+
+              audio = np.concatenate(chunks)
+
+              output = f"audio/scene_{index:02d}.wav"
+
+              sf.write(
+                  output,
                   audio,
-                  (0, minimum_samples - len(audio))
+                  24000
               )
-              print("Audio shorter than 30 seconds; padded with silence.")
 
-          sf.write("voice.wav", audio, sample_rate)
+              duration = len(audio) / 24000
 
-          duration = len(audio) / sample_rate
+              scene["audio"] = output
+              scene["duration"] = duration
 
-          print("Voice generated")
-          print("Duration:", duration)
+              print(
+                  f"Scene {index} duration: "
+                  f"{duration:.2f}s"
+              )
 
-          if duration < 30:
+          with open(
+              "scenes_with_audio.json",
+              "w",
+              encoding="utf-8"
+          ) as f:
+              json.dump(
+                  scenes,
+                  f,
+                  indent=2,
+                  ensure_ascii=False
+              )
+
+          total = sum(
+              scene["duration"]
+              for scene in scenes
+          )
+
+          print(
+              f"TOTAL VOICE DURATION: "
+              f"{total:.2f}s"
+          )
+
+          if total < 30:
               raise SystemExit(
-                  "ERROR: Voice generation produced less than 30 seconds"
+                  "ERROR: Final narration is under 30 seconds"
               )
           PY
 
-          python make_voice.py
+          python generate_voices.py
 
-      - name: Get Pexels video
+      # ============================================================
+      # 5. DOWNLOAD ONE RELEVANT PEXELS VIDEO PER SCENE
+      # ============================================================
+
+      - name: Download scene visuals
         env:
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
         run: |
+
           if [ -z "$PEXELS_API_KEY" ]; then
             echo "ERROR: PEXELS_API_KEY secret is missing"
             exit 1
           fi
 
-          QUERY="$NICHE"
+          mkdir -p clips
 
-          case "$NICHE" in
-            science)
-              QUERY="science space laboratory"
-              ;;
-            technology)
-              QUERY="technology artificial intelligence computer"
-              ;;
-            history)
-              QUERY="history ancient civilization historical"
-              ;;
-            wars)
-              QUERY="military history battlefield historical"
-              ;;
-          esac
-
-          echo "Pexels search: $QUERY"
-
-          curl -fL --retry 3 \
-            -H "Authorization: $PEXELS_API_KEY" \
-            --get \
-            --data-urlencode "query=$QUERY" \
-            --data-urlencode "orientation=portrait" \
-            --data-urlencode "size=medium" \
-            --data-urlencode "per_page=10" \
-            "https://api.pexels.com/v1/videos/search" \
-            -o pexels.json
-
-          python - <<'PY'
+          cat > download_pexels.py <<'PY'
           import json
+          import os
+          import subprocess
+          import requests
 
-          with open("pexels.json", encoding="utf-8") as f:
-              data = json.load(f)
+          API_KEY = os.environ["PEXELS_API_KEY"]
 
-          videos = data.get("videos", [])
-
-          if not videos:
-              raise SystemExit(
-                  "ERROR: Pexels returned no videos"
+          scenes = json.load(
+              open(
+                  "scenes_with_audio.json",
+                  encoding="utf-8"
               )
-
-          videos.sort(
-              key=lambda x: x.get("duration", 0),
-              reverse=True
           )
 
-          selected = None
+          headers = {
+              "Authorization": API_KEY
+          }
 
-          for video in videos:
-              files = [
-                  f
-                  for f in video.get("video_files", [])
-                  if f.get("link")
-                  and f.get("width", 0) > 0
-                  and f.get("height", 0) > 0
-              ]
+          for index, scene in enumerate(scenes, 1):
 
-              vertical = [
-                  f
-                  for f in files
-                  if f.get("height", 0) >= f.get("width", 0)
-              ]
+              query = scene["query"]
 
-              if vertical:
-                  selected = max(
-                      vertical,
-                      key=lambda x:
-                      x.get("width", 0) * x.get("height", 0)
-                  )
-                  break
+              print()
+              print("=" * 60)
+              print(f"Scene {index}")
+              print(f"Query: {query}")
+              print("=" * 60)
 
-              if files and selected is None:
-                  selected = max(
-                      files,
-                      key=lambda x:
-                      x.get("width", 0) * x.get("height", 0)
-                  )
-
-          if not selected:
-              raise SystemExit(
-                  "ERROR: No usable Pexels video found"
+              response = requests.get(
+                  "https://api.pexels.com/v1/videos/search",
+                  headers=headers,
+                  params={
+                      "query": query,
+                      "orientation": "portrait",
+                      "size": "medium",
+                      "per_page": 10
+                  },
+                  timeout=30
               )
 
+              response.raise_for_status()
+
+              data = response.json()
+
+              videos = data.get("videos", [])
+
+              if not videos:
+                  raise SystemExit(
+                      f"ERROR: No Pexels videos found for scene {index}: {query}"
+                  )
+
+              selected = None
+
+              # Prefer portrait videos.
+              for video in videos:
+
+                  files = [
+                      f
+                      for f in video.get("video_files", [])
+                      if f.get("link")
+                      and f.get("width", 0) > 0
+                      and f.get("height", 0) > 0
+                  ]
+
+                  portrait = [
+                      f
+                      for f in files
+                      if f.get("height", 0) >= f.get("width", 0)
+                  ]
+
+                  if portrait:
+                      selected = max(
+                          portrait,
+                          key=lambda x:
+                          x.get("width", 0)
+                          * x.get("height", 0)
+                      )
+                      break
+
+              # Fallback to any usable video.
+              if selected is None:
+
+                  for video in videos:
+
+                      files = [
+                          f
+                          for f in video.get("video_files", [])
+                          if f.get("link")
+                          and f.get("width", 0) > 0
+                          and f.get("height", 0) > 0
+                      ]
+
+                      if files:
+                          selected = max(
+                              files,
+                              key=lambda x:
+                              x.get("width", 0)
+                              * x.get("height", 0)
+                          )
+                          break
+
+              if selected is None:
+                  raise SystemExit(
+                      f"ERROR: No usable Pexels file for scene {index}"
+                  )
+
+              url = selected["link"]
+
+              output = (
+                  f"clips/scene_{index:02d}.mp4"
+              )
+
+              print(
+                  f"Downloading "
+                  f"{selected.get('width')}x"
+                  f"{selected.get('height')}"
+              )
+
+              subprocess.run(
+                  [
+                      "curl",
+                      "-fL",
+                      "--retry",
+                      "3",
+                      "--connect-timeout",
+                      "20",
+                      "--max-time",
+                      "120",
+                      url,
+                      "-o",
+                      output
+                  ],
+                  check=True
+              )
+
+              if not os.path.exists(output):
+                  raise SystemExit(
+                      f"ERROR: Download failed for scene {index}"
+                  )
+
+              if os.path.getsize(output) < 10000:
+                  raise SystemExit(
+                      f"ERROR: Downloaded clip is invalid for scene {index}"
+                  )
+
+              scene["video"] = output
+
           with open(
-              "video_url.txt",
+              "scenes_final.json",
               "w",
               encoding="utf-8"
           ) as f:
-              f.write(selected["link"])
+              json.dump(
+                  scenes,
+                  f,
+                  indent=2,
+                  ensure_ascii=False
+              )
 
-          print(
-              "Selected:",
-              selected.get("width"),
-              "x",
-              selected.get("height")
-          )
+          print()
+          print("All scene visuals downloaded successfully.")
           PY
 
-          curl -fL --retry 3 \
-            "$(cat video_url.txt)" \
-            -o source.mp4
+          python download_pexels.py
 
-          test -s source.mp4
+      # ============================================================
+      # 6. CREATE EACH SCENE VIDEO
+      #    VISUAL DURATION = EXACT AUDIO DURATION
+      # ============================================================
 
-      - name: Create subtitles
+      - name: Build synchronized scenes
+        run: |
+          mkdir -p rendered_scenes
+
+          cat > build_scenes.py <<'PY'
+          import json
+          import os
+          import subprocess
+
+          scenes = json.load(
+              open(
+                  "scenes_final.json",
+                  encoding="utf-8"
+              )
+          )
+
+          for index, scene in enumerate(scenes, 1):
+
+              video = scene["video"]
+              audio = scene["audio"]
+              duration = float(scene["duration"])
+
+              output = (
+                  f"rendered_scenes/scene_{index:02d}.mp4"
+              )
+
+              print(
+                  f"Rendering scene {index}: "
+                  f"{duration:.2f}s"
+              )
+
+              command = [
+                  "ffmpeg",
+                  "-y",
+
+                  "-stream_loop",
+                  "-1",
+                  "-i",
+                  video,
+
+                  "-i",
+                  audio,
+
+                  "-t",
+                  str(duration),
+
+                  "-vf",
+                  "scale=1080:1920:"
+                  "force_original_aspect_ratio=increase,"
+                  "crop=1080:1920",
+
+                  "-map",
+                  "0:v:0",
+
+                  "-map",
+                  "1:a:0",
+
+                  "-c:v",
+                  "libx264",
+
+                  "-preset",
+                  "veryfast",
+
+                  "-crf",
+                  "23",
+
+                  "-pix_fmt",
+                  "yuv420p",
+
+                  "-c:a",
+                  "aac",
+
+                  "-b:a",
+                  "128k",
+
+                  "-ar",
+                  "48000",
+
+                  "-shortest",
+
+                  "-movflags",
+                  "+faststart",
+
+                  output
+              ]
+
+              subprocess.run(
+                  command,
+                  check=True
+              )
+
+              if not os.path.exists(output):
+                  raise SystemExit(
+                      f"ERROR: Scene {index} was not rendered"
+                  )
+
+          print("All scenes rendered successfully.")
+          PY
+
+          python build_scenes.py
+
+      # ============================================================
+      # 7. CREATE EXACT SUBTITLES
+      # ============================================================
+
+      - name: Create synchronized subtitles
         run: |
           python - <<'PY'
-          import re
-          import wave
+          import json
 
-          text = open(
-              "script.txt",
-              encoding="utf-8"
-          ).read().strip()
-
-          sentences = [
-              x.strip()
-              for x in re.split(
-                  r'(?<=[.!?])\s+',
-                  text
+          scenes = json.load(
+              open(
+                  "scenes_final.json",
+                  encoding="utf-8"
               )
-              if x.strip()
-          ]
+          )
 
-          with wave.open("voice.wav", "rb") as w:
-              duration = (
-                  w.getnframes() /
-                  w.getframerate()
+          def timestamp(seconds):
+              milliseconds = int(
+                  round(seconds * 1000)
               )
 
-          weights = [
-              max(1, len(x.split()))
-              for x in sentences
-          ]
+              hours = milliseconds // 3600000
+              milliseconds %= 3600000
 
-          total = sum(weights)
+              minutes = milliseconds // 60000
+              milliseconds %= 60000
 
-          def timestamp(sec):
-              ms = int(sec * 1000)
-              h = ms // 3600000
-              ms %= 3600000
-              m = ms // 60000
-              ms %= 60000
-              s = ms // 1000
-              ms %= 1000
+              seconds = milliseconds // 1000
+              milliseconds %= 1000
 
               return (
-                  f"{h:02}:{m:02}:{s:02},"
-                  f"{ms:03}"
+                  f"{hours:02}:"
+                  f"{minutes:02}:"
+                  f"{seconds:02},"
+                  f"{milliseconds:03}"
               )
 
-          current = 0
+          current = 0.0
 
           with open(
               "subtitles.srt",
               "w",
               encoding="utf-8"
           ) as f:
-              for i, (sentence, weight) in enumerate(
-                  zip(sentences, weights),
-                  1
-              ):
-                  length = (
-                      duration *
-                      weight /
-                      total
-                  )
+
+              subtitle_number = 1
+
+              for scene in scenes:
 
                   start = current
-                  end = min(
-                      duration,
-                      current + length
+                  end = (
+                      current +
+                      float(scene["duration"])
                   )
 
-                  f.write(f"{i}\n")
+                  text = scene["text"].strip()
+
+                  f.write(
+                      f"{subtitle_number}\n"
+                  )
+
                   f.write(
                       f"{timestamp(start)} --> "
                       f"{timestamp(end)}\n"
                   )
-                  f.write(f"{sentence}\n\n")
 
+                  f.write(
+                      f"{text}\n\n"
+                  )
+
+                  subtitle_number += 1
                   current = end
 
-          print("Subtitles created")
-          print("Audio duration:", duration)
+          print(
+              f"Created {subtitle_number - 1} "
+              f"subtitle blocks."
+          )
+
+          print(
+              f"Subtitle duration: "
+              f"{current:.2f}s"
+          )
           PY
 
-      - name: Render vertical Short
-        run: |
-          DURATION=$(ffprobe -v error \
-            -show_entries format=duration \
-            -of default=noprint_wrappers=1:nokey=1 \
-            voice.wav)
+      # ============================================================
+      # 8. CONCATENATE ALL SCENES
+      # ============================================================
 
-          echo "Rendering duration: ${DURATION} seconds"
+      - name: Create concat list
+        run: |
+          rm -f concat.txt
+
+          for file in rendered_scenes/scene_*.mp4; do
+            echo "file '$PWD/$file'" >> concat.txt
+          done
+
+          cat concat.txt
+
+      - name: Concatenate scenes
+        run: |
+          ffmpeg -y \
+            -f concat \
+            -safe 0 \
+            -i concat.txt \
+            -c copy \
+            combined.mp4
+
+          test -s combined.mp4
+
+      # ============================================================
+      # 9. FINAL MASTER VIDEO + SUBTITLES
+      # ============================================================
+
+      - name: Render final Short
+        run: |
 
           ffmpeg -y \
-            -stream_loop -1 \
-            -i source.mp4 \
-            -i voice.wav \
-            -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,subtitles=subtitles.srt:force_style='FontSize=18,Outline=3,Alignment=2,MarginV=120'" \
-            -t "$DURATION" \
-            -map 0:v:0 \
-            -map 1:a:0 \
+            -i combined.mp4 \
+            -vf "subtitles=subtitles.srt:force_style='FontName=DejaVu Sans,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=3,Shadow=1,Alignment=2,MarginV=120'" \
             -c:v libx264 \
             -preset veryfast \
             -crf 23 \
@@ -364,51 +731,93 @@ jobs:
             -movflags +faststart \
             final-short.mp4
 
+          test -s final-short.mp4
+
+      # ============================================================
+      # 10. VALIDATE EVERYTHING
+      # ============================================================
+
       - name: Validate final video
         run: |
+
           DURATION=$(ffprobe -v error \
             -show_entries format=duration \
             -of default=noprint_wrappers=1:nokey=1 \
             final-short.mp4)
 
+          WIDTH=$(ffprobe -v error \
+            -select_streams v:0 \
+            -show_entries stream=width \
+            -of csv=p=0 \
+            final-short.mp4)
+
+          HEIGHT=$(ffprobe -v error \
+            -select_streams v:0 \
+            -show_entries stream=height \
+            -of csv=p=0 \
+            final-short.mp4)
+
           SIZE=$(stat -c%s final-short.mp4)
 
-          echo "Final duration: ${DURATION} seconds"
-          echo "Final size: ${SIZE} bytes"
+          echo "================================"
+          echo "FINAL VIDEO CHECK"
+          echo "Duration: ${DURATION}s"
+          echo "Resolution: ${WIDTH}x${HEIGHT}"
+          echo "Size: ${SIZE} bytes"
+          echo "================================"
 
           test -s final-short.mp4
 
-          python - "$DURATION" <<'PY'
+          python - "$DURATION" "$WIDTH" "$HEIGHT" <<'PY'
           import sys
 
           duration = float(sys.argv[1])
+          width = int(sys.argv[2])
+          height = int(sys.argv[3])
 
           if duration < 30:
               raise SystemExit(
-                  f"ERROR: Video is only "
-                  f"{duration:.2f}s. "
-                  f"Minimum is 30s."
+                  f"ERROR: Final video is only "
+                  f"{duration:.2f}s. Minimum is 30s."
+              )
+
+          if width != 1080 or height != 1920:
+              raise SystemExit(
+                  f"ERROR: Wrong resolution: "
+                  f"{width}x{height}. "
+                  f"Expected 1080x1920."
               )
 
           print(
-              f"Video duration valid: "
-              f"{duration:.2f}s"
+              f"Duration OK: {duration:.2f}s"
           )
 
           print(
-              "No maximum duration limit "
-              "is enforced."
+              f"Resolution OK: "
+              f"{width}x{height}"
+          )
+
+          print(
+              "No maximum duration limit enforced."
           )
           PY
 
           ffprobe -v error \
             -show_entries format=duration,size \
+            -show_entries stream=codec_name,width,height \
             -of default=noprint_wrappers=1 \
             final-short.mp4
+
+      # ============================================================
+      # 11. UPLOAD ARTIFACT
+      # ============================================================
 
       - name: Upload final Short
         uses: actions/upload-artifact@v4
         with:
           name: final-short-${{ github.run_id }}
-          path: final-short.mp4
+          path: |
+            final-short.mp4
+            subtitles.srt
+            scenes_final.json
           retention-days: 7
