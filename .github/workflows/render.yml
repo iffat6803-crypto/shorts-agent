@@ -1,0 +1,50 @@
+name: Test Render Runner
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check runner
+        run: |
+          echo "GitHub Actions runner is working"
+          echo "OS: $(uname -a)"
+          echo "CPU: $(nproc)"
+          echo "Memory:"
+          free -h
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Check FFmpeg
+        run: |
+          ffmpeg -version | head -n 3
+
+      - name: Create test video
+        run: |
+          ffmpeg -y \
+            -f lavfi -i color=c=black:s=1080x1920:d=5 \
+            -f lavfi -i anullsrc=r=44100:cl=stereo \
+            -shortest \
+            -c:v libx264 \
+            -pix_fmt yuv420p \
+            -c:a aac \
+            test-video.mp4
+
+      - name: Check video
+        run: |
+          ffprobe -v error \
+            -show_entries format=duration,size \
+            -of default=noprint_wrappers=1 \
+            test-video.mp4
+
+      - name: Upload test video
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-video
+          path: test-video.mp4
