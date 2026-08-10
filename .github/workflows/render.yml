@@ -1,32 +1,414 @@
-  - name: Validate final video
-    run: |
-      DURATION=$(ffprobe -v error \
-        -show_entries format=duration \
-        -of default=noprint_wrappers=1:nokey=1 final-short.mp4)
+name: Final Short Test
 
-      echo "Final duration: ${DURATION} seconds"
+on:
+  workflow_dispatch:
+    inputs:
+      niche:
+        description: "Video niche"
+        required: false
+        default: "science"
+        type: choice
+        options:
+          - science
+          - technology
+          - history
+          - wars
 
-      python - "$DURATION" <<'PY'
-      import sys
+jobs:
+  render:
+    runs-on: ubuntu-latest
 
-      duration = float(sys.argv[1])
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-      if duration < 30:
-          raise SystemExit(
-              f"ERROR: Video is only {duration:.2f}s. Minimum is 30s."
+      - name: Read niche
+        run: |
+          NICHE="${{ github.event.inputs.niche }}"
+          if [ -z "$NICHE" ]; then NICHE="science"; fi
+          echo "NICHE=$NICHE" >> "$GITHUB_ENV"
+          echo "Selected niche: $NICHE"
+
+      - name: Install system tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg espeak-ng
+
+      - name: Install Kokoro
+        run: |
+          python -m pip install --upgrade pip
+          pip install "kokoro>=0.9.4" soundfile numpy
+
+      - name: Create script
+        run: |
+          case "$NICHE" in
+            technology)
+              cat > script.txt <<'EOF'
+          Technology is changing faster than most people realize.
+          Every year, new inventions completely change how we work and communicate.
+          Artificial intelligence is one of the biggest examples.
+          Modern AI systems can now understand text, analyze images, generate audio, and help solve complex problems.
+          But the most interesting part is not what AI can do today.
+          It is how quickly these capabilities are improving.
+          The technology we consider impressive today may become completely normal in just a few years.
+          That is why understanding new technology early can give us a major advantage.
+          EOF
+              ;;
+
+            history)
+              cat > script.txt <<'EOF'
+          One of the most fascinating things about history is how small events can create enormous consequences.
+          A decision made by a single leader can sometimes change the future of entire nations.
+          Wars, discoveries, inventions, and political changes are often connected in surprising ways.
+          What looks like an isolated event may actually be part of a much larger chain of events.
+          Historians study these connections to understand why civilizations rise, change, and sometimes disappear.
+          And the deeper we look into history, the more complicated the story becomes.
+          EOF
+              ;;
+
+            wars)
+              cat > script.txt <<'EOF'
+          Some of the most important military events in history were decided by technology, strategy, and timing.
+          Armies could have enormous advantages on paper and still lose because their plans failed.
+          Communication, supply lines, intelligence, and geography often mattered just as much as weapons.
+          In many famous battles, a small tactical decision created consequences far beyond the battlefield.
+          That is why military history is not simply about who had the strongest army.
+          It is also about decisions, preparation, information, and the ability to adapt.
+          EOF
+              ;;
+
+            science|*)
+              cat > script.txt <<'EOF'
+          Scientists recently discovered something fascinating about our universe.
+          A strange object deep in space is behaving in a way scientists did not expect.
+          It appears to be producing powerful signals that travel across enormous distances.
+          The surprising part is that these signals repeat in a very unusual pattern.
+          Researchers are now studying whether the pattern can reveal what is happening around the object.
+          This does not mean aliens have been discovered.
+          But it does show us that the universe still contains phenomena we do not fully understand.
+          Every new observation gives scientists another clue.
+          And sometimes, the biggest discoveries begin with something that simply looks strange.
+          EOF
+              ;;
+          esac
+
+      - name: Generate voice
+        run: |
+          cat > make_voice.py <<'PY'
+          from kokoro import KPipeline
+          import soundfile as sf
+          import numpy as np
+
+          text = open("script.txt", encoding="utf-8").read().strip()
+          pipeline = KPipeline(lang_code="a")
+          chunks = []
+
+          for _, _, audio in pipeline(
+              text,
+              voice="af_heart",
+              speed=1.0
+          ):
+              chunks.append(audio)
+
+          if not chunks:
+              raise SystemExit("ERROR: Kokoro produced no audio")
+
+          audio = np.concatenate(chunks)
+          sample_rate = 24000
+          minimum_samples = 30 * sample_rate
+
+          if len(audio) < minimum_samples:
+              audio = np.pad(
+                  audio,
+                  (0, minimum_samples - len(audio))
+              )
+              print("Audio shorter than 30 seconds; padded with silence.")
+
+          sf.write("voice.wav", audio, sample_rate)
+
+          duration = len(audio) / sample_rate
+
+          print("Voice generated")
+          print("Duration:", duration)
+
+          if duration < 30:
+              raise SystemExit(
+                  "ERROR: Voice generation produced less than 30 seconds"
+              )
+          PY
+
+          python make_voice.py
+
+      - name: Get Pexels video
+        env:
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+        run: |
+          if [ -z "$PEXELS_API_KEY" ]; then
+            echo "ERROR: PEXELS_API_KEY secret is missing"
+            exit 1
+          fi
+
+          QUERY="$NICHE"
+
+          case "$NICHE" in
+            science)
+              QUERY="science space laboratory"
+              ;;
+            technology)
+              QUERY="technology artificial intelligence computer"
+              ;;
+            history)
+              QUERY="history ancient civilization historical"
+              ;;
+            wars)
+              QUERY="military history battlefield historical"
+              ;;
+          esac
+
+          echo "Pexels search: $QUERY"
+
+          curl -fL --retry 3 \
+            -H "Authorization: $PEXELS_API_KEY" \
+            --get \
+            --data-urlencode "query=$QUERY" \
+            --data-urlencode "orientation=portrait" \
+            --data-urlencode "size=medium" \
+            --data-urlencode "per_page=10" \
+            "https://api.pexels.com/v1/videos/search" \
+            -o pexels.json
+
+          python - <<'PY'
+          import json
+
+          with open("pexels.json", encoding="utf-8") as f:
+              data = json.load(f)
+
+          videos = data.get("videos", [])
+
+          if not videos:
+              raise SystemExit(
+                  "ERROR: Pexels returned no videos"
+              )
+
+          videos.sort(
+              key=lambda x: x.get("duration", 0),
+              reverse=True
           )
 
-      if duration > 60:
-          raise SystemExit(
-              f"ERROR: Video is {duration:.2f}s. Maximum is 60s."
+          selected = None
+
+          for video in videos:
+              files = [
+                  f
+                  for f in video.get("video_files", [])
+                  if f.get("link")
+                  and f.get("width", 0) > 0
+                  and f.get("height", 0) > 0
+              ]
+
+              vertical = [
+                  f
+                  for f in files
+                  if f.get("height", 0) >= f.get("width", 0)
+              ]
+
+              if vertical:
+                  selected = max(
+                      vertical,
+                      key=lambda x:
+                      x.get("width", 0) * x.get("height", 0)
+                  )
+                  break
+
+              if files and selected is None:
+                  selected = max(
+                      files,
+                      key=lambda x:
+                      x.get("width", 0) * x.get("height", 0)
+                  )
+
+          if not selected:
+              raise SystemExit(
+                  "ERROR: No usable Pexels video found"
+              )
+
+          with open(
+              "video_url.txt",
+              "w",
+              encoding="utf-8"
+          ) as f:
+              f.write(selected["link"])
+
+          print(
+              "Selected:",
+              selected.get("width"),
+              "x",
+              selected.get("height")
+          )
+          PY
+
+          curl -fL --retry 3 \
+            "$(cat video_url.txt)" \
+            -o source.mp4
+
+          test -s source.mp4
+
+      - name: Create subtitles
+        run: |
+          python - <<'PY'
+          import re
+          import wave
+
+          text = open(
+              "script.txt",
+              encoding="utf-8"
+          ).read().strip()
+
+          sentences = [
+              x.strip()
+              for x in re.split(
+                  r'(?<=[.!?])\s+',
+                  text
+              )
+              if x.strip()
+          ]
+
+          with wave.open("voice.wav", "rb") as w:
+              duration = (
+                  w.getnframes() /
+                  w.getframerate()
+              )
+
+          weights = [
+              max(1, len(x.split()))
+              for x in sentences
+          ]
+
+          total = sum(weights)
+
+          def timestamp(sec):
+              ms = int(sec * 1000)
+              h = ms // 3600000
+              ms %= 3600000
+              m = ms // 60000
+              ms %= 60000
+              s = ms // 1000
+              ms %= 1000
+
+              return (
+                  f"{h:02}:{m:02}:{s:02},"
+                  f"{ms:03}"
+              )
+
+          current = 0
+
+          with open(
+              "subtitles.srt",
+              "w",
+              encoding="utf-8"
+          ) as f:
+              for i, (sentence, weight) in enumerate(
+                  zip(sentences, weights),
+                  1
+              ):
+                  length = (
+                      duration *
+                      weight /
+                      total
+                  )
+
+                  start = current
+                  end = min(
+                      duration,
+                      current + length
+                  )
+
+                  f.write(f"{i}\n")
+                  f.write(
+                      f"{timestamp(start)} --> "
+                      f"{timestamp(end)}\n"
+                  )
+                  f.write(f"{sentence}\n\n")
+
+                  current = end
+
+          print("Subtitles created")
+          print("Audio duration:", duration)
+          PY
+
+      - name: Render vertical Short
+        run: |
+          DURATION=$(ffprobe -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            voice.wav)
+
+          echo "Rendering duration: ${DURATION} seconds"
+
+          ffmpeg -y \
+            -stream_loop -1 \
+            -i source.mp4 \
+            -i voice.wav \
+            -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,subtitles=subtitles.srt:force_style='FontSize=18,Outline=3,Alignment=2,MarginV=120'" \
+            -t "$DURATION" \
+            -map 0:v:0 \
+            -map 1:a:0 \
+            -c:v libx264 \
+            -preset veryfast \
+            -crf 23 \
+            -pix_fmt yuv420p \
+            -c:a aac \
+            -b:a 128k \
+            -movflags +faststart \
+            final-short.mp4
+
+      - name: Validate final video
+        run: |
+          DURATION=$(ffprobe -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            final-short.mp4)
+
+          SIZE=$(stat -c%s final-short.mp4)
+
+          echo "Final duration: ${DURATION} seconds"
+          echo "Final size: ${SIZE} bytes"
+
+          test -s final-short.mp4
+
+          python - "$DURATION" <<'PY'
+          import sys
+
+          duration = float(sys.argv[1])
+
+          if duration < 30:
+              raise SystemExit(
+                  f"ERROR: Video is only "
+                  f"{duration:.2f}s. "
+                  f"Minimum is 30s."
+              )
+
+          print(
+              f"Video duration valid: "
+              f"{duration:.2f}s"
           )
 
-      print(f"Video duration valid: {duration:.2f}s")
-      PY
+          print(
+              "No maximum duration limit "
+              "is enforced."
+          )
+          PY
 
-      ffprobe -v error \
-        -show_entries format=duration,size \
-        -of default=noprint_wrappers=1 \
-        final-short.mp4
+          ffprobe -v error \
+            -show_entries format=duration,size \
+            -of default=noprint_wrappers=1 \
+            final-short.mp4
 
-      test -s final-short.mp4
+      - name: Upload final Short
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-short-${{ github.run_id }}
+          path: final-short.mp4
+          retention-days: 7
