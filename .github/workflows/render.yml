@@ -1,10 +1,10 @@
-name: Pexels Test
+name: Final Short Test
 
 on:
   workflow_dispatch:
 
 jobs:
-  pexels:
+  render:
     runs-on: ubuntu-latest
 
     steps:
@@ -13,12 +13,60 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install tools
+      - name: Install system tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl ffmpeg
+          sudo apt-get install -y ffmpeg espeak-ng
 
-      - name: Search Pexels
+      - name: Install Kokoro
+        run: |
+          python -m pip install --upgrade pip
+          pip install "kokoro>=0.9.4" soundfile
+
+      - name: Create script
+        run: |
+          cat > script.txt <<'EOF'
+          Scientists recently discovered something fascinating about our universe.
+          A strange object deep in space is behaving in a way scientists did not expect.
+          It appears to be producing powerful signals that travel across enormous distances.
+          The surprising part is that these signals repeat in a very unusual pattern.
+          Researchers are now studying whether the pattern can reveal what is happening around the object.
+          This does not mean aliens have been discovered.
+          But it does show us that the universe still contains phenomena we do not fully understand.
+          Every new observation gives scientists another clue.
+          And sometimes, the biggest discoveries begin with something that simply looks strange.
+          EOF
+
+      - name: Generate voice
+        run: |
+          cat > make_voice.py <<'PY'
+          from kokoro import KPipeline
+          import soundfile as sf
+          import numpy as np
+
+          text = open("script.txt").read().strip()
+          pipeline = KPipeline(lang_code="a")
+
+          chunks = []
+
+          for _, _, audio in pipeline(
+              text,
+              voice="af_heart",
+              speed=1.0
+          ):
+              chunks.append(audio)
+
+          audio = np.concatenate(chunks)
+          sf.write("voice.wav", audio, 24000)
+
+          print("Voice generated")
+          print("Samples:", len(audio))
+          print("Duration:", len(audio) / 24000)
+          PY
+
+          python make_voice.py
+
+      - name: Get Pexels video
         env:
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
         run: |
@@ -34,41 +82,136 @@ jobs:
           videos = d.get("videos", [])
 
           if not videos:
-              raise SystemExit("ERROR: Pexels returned no videos")
+              raise SystemExit("No Pexels videos found")
 
-          print("PEXELS API: OK")
-          print("Videos found:", len(videos))
+          # Prefer portrait videos with usable duration
+          videos = sorted(
+              videos,
+              key=lambda x: x.get("duration", 0),
+              reverse=True
+          )
 
-          v = videos[0]
-          files = [f for f in v.get("video_files", []) if f.get("link")]
+          for v in videos:
+              files = [
+                  f for f in v.get("video_files", [])
+                  if f.get("link")
+                  and f.get("width", 0) > 0
+                  and f.get("height", 0) > 0
+              ]
 
-          if not files:
-              raise SystemExit("ERROR: No video download URL")
+              if files:
+                  # Prefer vertical file
+                  vertical = [
+                      f for f in files
+                      if f.get("height", 0) >= f.get("width", 0)
+                  ]
 
-          f = max(files, key=lambda x: x.get("width", 0) * x.get("height", 0))
+                  if vertical:
+                      f = max(
+                          vertical,
+                          key=lambda x: x.get("width", 0) * x.get("height", 0)
+                      )
+                  else:
+                      f = max(
+                          files,
+                          key=lambda x: x.get("width", 0) * x.get("height", 0)
+                      )
 
-          print("Download URL found")
-          print("Resolution:", f.get("width"), "x", f.get("height"))
-          print("Duration:", v.get("duration"))
+                  open("video_url.txt", "w").write(f["link"])
+                  print("Pexels video selected")
+                  print(f.get("width"), "x", f.get("height"))
+                  break
+          else:
+              raise SystemExit("No usable Pexels video")
 
-          open("video_url.txt", "w").write(f["link"])
           PY
 
-      - name: Download video
-        run: |
           curl -fL --retry 3 \
             "$(cat video_url.txt)" \
-            -o pexels-test.mp4
+            -o source.mp4
 
-      - name: Validate video
+      - name: Create subtitles
+        run: |
+          python - <<'PY'
+          import re
+          import wave
+
+          text = open("script.txt").read().strip()
+
+          sentences = [
+              x.strip()
+              for x in re.split(r'(?<=[.!?])\s+', text)
+              if x.strip()
+          ]
+
+          with wave.open("voice.wav", "rb") as w:
+              duration = w.getnframes() / w.getframerate()
+
+          weights = [max(1, len(x.split())) for x in sentences]
+          total = sum(weights)
+
+          def timestamp(sec):
+              ms = int(sec * 1000)
+              h = ms // 3600000
+              ms %= 3600000
+              m = ms // 60000
+              ms %= 60000
+              s = ms // 1000
+              ms %= 1000
+              return f"{h:02}:{m:02}:{s:02},{ms:03}"
+
+          current = 0
+
+          with open("subtitles.srt", "w") as f:
+              for i, (sentence, weight) in enumerate(zip(sentences, weights), 1):
+                  length = duration * weight / total
+                  start = current
+                  end = min(duration, current + length)
+
+                  f.write(f"{i}\n")
+                  f.write(f"{timestamp(start)} --> {timestamp(end)}\n")
+                  f.write(f"{sentence}\n\n")
+
+                  current = end
+
+          print("Subtitles created")
+          print("Audio duration:", duration)
+          PY
+
+      - name: Render vertical Short
+        run: |
+          DURATION=$(ffprobe -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 voice.wav)
+
+          ffmpeg -y \
+            -stream_loop -1 \
+            -i source.mp4 \
+            -i voice.wav \
+            -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,subtitles=subtitles.srt:force_style='FontSize=18,Outline=3,Alignment=2,MarginV=120'" \
+            -t "$DURATION" \
+            -map 0:v:0 \
+            -map 1:a:0 \
+            -c:v libx264 \
+            -preset veryfast \
+            -crf 23 \
+            -pix_fmt yuv420p \
+            -c:a aac \
+            -b:a 128k \
+            -movflags +faststart \
+            final-short.mp4
+
+      - name: Validate final video
         run: |
           ffprobe -v error \
             -show_entries format=duration,size \
             -of default=noprint_wrappers=1 \
-            pexels-test.mp4
+            final-short.mp4
 
-      - name: Upload test video
+          test -s final-short.mp4
+
+      - name: Upload final Short
         uses: actions/upload-artifact@v4
         with:
-          name: pexels-test-video
-          path: pexels-test.mp4
+          name: final-short-test
+          path: final-short.mp4
