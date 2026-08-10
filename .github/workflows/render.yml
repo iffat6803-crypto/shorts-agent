@@ -8,7 +8,17 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Search Pexels vertical video
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl ffmpeg
+
+      - name: Search Pexels
         env:
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
         run: |
@@ -19,40 +29,36 @@ jobs:
 
           python - <<'PY'
           import json
-          d=json.load(open("pexels.json"))
-          videos=d.get("videos",[])
-          if not videos:
-              raise SystemExit("ERROR: No Pexels videos found")
 
-          print("Pexels OK")
+          d = json.load(open("pexels.json"))
+          videos = d.get("videos", [])
+
+          if not videos:
+              raise SystemExit("ERROR: Pexels returned no videos")
+
+          print("PEXELS API: OK")
           print("Videos found:", len(videos))
 
-          v=videos[0]
-          files=[f for f in v.get("video_files",[]) if f.get("link")]
+          v = videos[0]
+          files = [f for f in v.get("video_files", []) if f.get("link")]
+
           if not files:
-              raise SystemExit("ERROR: No downloadable video file")
+              raise SystemExit("ERROR: No video download URL")
 
-          f=max(files,key=lambda x:(x.get("width",0)*x.get("height",0)))
-          print("Video URL found")
-          print("Resolution:",f.get("width"),"x",f.get("height"))
-          print("Duration:",v.get("duration"))
+          f = max(files, key=lambda x: x.get("width", 0) * x.get("height", 0))
+
+          print("Download URL found")
+          print("Resolution:", f.get("width"), "x", f.get("height"))
+          print("Duration:", v.get("duration"))
+
+          open("video_url.txt", "w").write(f["link"])
           PY
 
-      - name: Download test video
-        env:
-          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+      - name: Download video
         run: |
-          URL=$(python - <<'PY'
-          import json
-          d=json.load(open("pexels.json"))
-          v=d["videos"][0]
-          files=[f for f in v["video_files"] if f.get("link")]
-          f=max(files,key=lambda x:x.get("width",0)*x.get("height",0))
-          print(f["link"])
-          PY
-          )
-
-          curl -fL --retry 3 --retry-delay 5 "$URL" -o pexels-test.mp4
+          curl -fL --retry 3 \
+            "$(cat video_url.txt)" \
+            -o pexels-test.mp4
 
       - name: Validate video
         run: |
@@ -61,7 +67,7 @@ jobs:
             -of default=noprint_wrappers=1 \
             pexels-test.mp4
 
-      - name: Upload test
+      - name: Upload test video
         uses: actions/upload-artifact@v4
         with:
           name: pexels-test-video
