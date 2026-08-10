@@ -2,6 +2,17 @@ name: Final Short Test
 
 on:
   workflow_dispatch:
+    inputs:
+      niche:
+        description: "Video niche"
+        required: false
+        default: "science"
+        type: choice
+        options:
+          - science
+          - technology
+          - history
+          - wars
 
 jobs:
   render:
@@ -13,6 +24,12 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Read niche
+        run: |
+          NICHE="${{ github.event.inputs.niche }}"
+          echo "NICHE=$NICHE" >> "$GITHUB_ENV"
+          echo "Selected niche: $NICHE"
+
       - name: Install system tools
         run: |
           sudo apt-get update
@@ -21,11 +38,48 @@ jobs:
       - name: Install Kokoro
         run: |
           python -m pip install --upgrade pip
-          pip install "kokoro>=0.9.4" soundfile
+          pip install "kokoro>=0.9.4" soundfile numpy
 
       - name: Create script
         run: |
-          cat > script.txt <<'EOF'
+          case "$NICHE" in
+            technology)
+              cat > script.txt <<'EOF'
+          Technology is changing faster than most people realize.
+          Every year, new inventions completely change how we work and communicate.
+          Artificial intelligence is one of the biggest examples.
+          Modern AI systems can now understand text, analyze images, generate audio, and help solve complex problems.
+          But the most interesting part is not what AI can do today.
+          It is how quickly these capabilities are improving.
+          The technology we consider impressive today may become completely normal in just a few years.
+          That is why understanding new technology early can give us a major advantage.
+          EOF
+              ;;
+
+            history)
+              cat > script.txt <<'EOF'
+          One of the most fascinating things about history is how small events can create enormous consequences.
+          A decision made by a single leader can sometimes change the future of entire nations.
+          Wars, discoveries, inventions, and political changes are often connected in surprising ways.
+          What looks like an isolated event may actually be part of a much larger chain of events.
+          Historians study these connections to understand why civilizations rise, change, and sometimes disappear.
+          And the deeper we look into history, the more complicated the story becomes.
+          EOF
+              ;;
+
+            wars)
+              cat > script.txt <<'EOF'
+          Some of the most important military events in history were decided by technology, strategy, and timing.
+          Armies could have enormous advantages on paper and still lose because their plans failed.
+          Communication, supply lines, intelligence, and geography often mattered just as much as weapons.
+          In many famous battles, a small tactical decision created consequences far beyond the battlefield.
+          That is why military history is not simply about who had the strongest army.
+          It is also about decisions, preparation, information, and the ability to adapt.
+          EOF
+              ;;
+
+            science|*)
+              cat > script.txt <<'EOF'
           Scientists recently discovered something fascinating about our universe.
           A strange object deep in space is behaving in a way scientists did not expect.
           It appears to be producing powerful signals that travel across enormous distances.
@@ -36,6 +90,8 @@ jobs:
           Every new observation gives scientists another clue.
           And sometimes, the biggest discoveries begin with something that simply looks strange.
           EOF
+              ;;
+          esac
 
       - name: Generate voice
         run: |
@@ -44,9 +100,9 @@ jobs:
           import soundfile as sf
           import numpy as np
 
-          text = open("script.txt").read().strip()
-          pipeline = KPipeline(lang_code="a")
+          text = open("script.txt", encoding="utf-8").read().strip()
 
+          pipeline = KPipeline(lang_code="a")
           chunks = []
 
           for _, _, audio in pipeline(
@@ -56,12 +112,17 @@ jobs:
           ):
               chunks.append(audio)
 
+          if not chunks:
+              raise SystemExit("ERROR: Kokoro produced no audio")
+
           audio = np.concatenate(chunks)
           sf.write("voice.wav", audio, 24000)
 
           print("Voice generated")
-          print("Samples:", len(audio))
           print("Duration:", len(audio) / 24000)
+
+          if len(audio) / 24000 < 45:
+              print("WARNING: Audio is shorter than 45 seconds")
           PY
 
           python make_voice.py
@@ -70,65 +131,99 @@ jobs:
         env:
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
         run: |
-          curl -fL \
+          QUERY="$NICHE"
+
+          case "$NICHE" in
+            science)
+              QUERY="science space laboratory"
+              ;;
+            technology)
+              QUERY="technology artificial intelligence computer"
+              ;;
+            history)
+              QUERY="history ancient civilization historical"
+              ;;
+            wars)
+              QUERY="military history battlefield historical"
+              ;;
+          esac
+
+          echo "Pexels search: $QUERY"
+
+          curl -fL --retry 3 \
             -H "Authorization: $PEXELS_API_KEY" \
-            "https://api.pexels.com/v1/videos/search?query=space%20science&orientation=portrait&size=medium&per_page=5" \
+            --get \
+            --data-urlencode "query=$QUERY" \
+            --data-urlencode "orientation=portrait" \
+            --data-urlencode "size=medium" \
+            --data-urlencode "per_page=10" \
+            "https://api.pexels.com/v1/videos/search" \
             -o pexels.json
 
           python - <<'PY'
           import json
 
-          d = json.load(open("pexels.json"))
-          videos = d.get("videos", [])
+          with open("pexels.json", encoding="utf-8") as f:
+              data = json.load(f)
+
+          videos = data.get("videos", [])
 
           if not videos:
-              raise SystemExit("No Pexels videos found")
+              raise SystemExit("ERROR: Pexels returned no videos")
 
-          # Prefer portrait videos with usable duration
           videos = sorted(
               videos,
               key=lambda x: x.get("duration", 0),
               reverse=True
           )
 
-          for v in videos:
+          selected = None
+
+          for video in videos:
               files = [
-                  f for f in v.get("video_files", [])
+                  f for f in video.get("video_files", [])
                   if f.get("link")
                   and f.get("width", 0) > 0
                   and f.get("height", 0) > 0
               ]
 
-              if files:
-                  # Prefer vertical file
-                  vertical = [
-                      f for f in files
-                      if f.get("height", 0) >= f.get("width", 0)
-                  ]
+              vertical = [
+                  f for f in files
+                  if f.get("height", 0) >= f.get("width", 0)
+              ]
 
-                  if vertical:
-                      f = max(
-                          vertical,
-                          key=lambda x: x.get("width", 0) * x.get("height", 0)
-                      )
-                  else:
-                      f = max(
-                          files,
-                          key=lambda x: x.get("width", 0) * x.get("height", 0)
-                      )
-
-                  open("video_url.txt", "w").write(f["link"])
-                  print("Pexels video selected")
-                  print(f.get("width"), "x", f.get("height"))
+              if vertical:
+                  selected = max(
+                      vertical,
+                      key=lambda x: x.get("width", 0) * x.get("height", 0)
+                  )
                   break
-          else:
-              raise SystemExit("No usable Pexels video")
 
+              if files and selected is None:
+                  selected = max(
+                      files,
+                      key=lambda x: x.get("width", 0) * x.get("height", 0)
+                  )
+
+          if not selected:
+              raise SystemExit("ERROR: No usable Pexels video found")
+
+          with open("video_url.txt", "w") as f:
+              f.write(selected["link"])
+
+          print(
+              "Selected:",
+              selected.get("width"),
+              "x",
+              selected.get("height")
+          )
           PY
 
           curl -fL --retry 3 \
             "$(cat video_url.txt)" \
             -o source.mp4
+
+          test -s source.mp4
 
       - name: Create subtitles
         run: |
@@ -136,7 +231,7 @@ jobs:
           import re
           import wave
 
-          text = open("script.txt").read().strip()
+          text = open("script.txt", encoding="utf-8").read().strip()
 
           sentences = [
               x.strip()
@@ -162,14 +257,18 @@ jobs:
 
           current = 0
 
-          with open("subtitles.srt", "w") as f:
-              for i, (sentence, weight) in enumerate(zip(sentences, weights), 1):
+          with open("subtitles.srt", "w", encoding="utf-8") as f:
+              for i, (sentence, weight) in enumerate(
+                  zip(sentences, weights), 1
+              ):
                   length = duration * weight / total
                   start = current
                   end = min(duration, current + length)
 
                   f.write(f"{i}\n")
-                  f.write(f"{timestamp(start)} --> {timestamp(end)}\n")
+                  f.write(
+                      f"{timestamp(start)} --> {timestamp(end)}\n"
+                  )
                   f.write(f"{sentence}\n\n")
 
                   current = end
@@ -182,7 +281,8 @@ jobs:
         run: |
           DURATION=$(ffprobe -v error \
             -show_entries format=duration \
-            -of default=noprint_wrappers=1:nokey=1 voice.wav)
+            -of default=noprint_wrappers=1:nokey=1 \
+            voice.wav)
 
           ffmpeg -y \
             -stream_loop -1 \
@@ -203,15 +303,37 @@ jobs:
 
       - name: Validate final video
         run: |
-          ffprobe -v error \
-            -show_entries format=duration,size \
-            -of default=noprint_wrappers=1 \
-            final-short.mp4
+          DURATION=$(ffprobe -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            final-short.mp4)
+
+          SIZE=$(stat -c%s final-short.mp4)
+
+          echo "Final duration: $DURATION seconds"
+          echo "Final size: $SIZE bytes"
 
           test -s final-short.mp4
+
+          python - <<PY
+          duration = float("$DURATION")
+
+          if duration < 45:
+              raise SystemExit(
+                  f"ERROR: Video is only {duration:.2f}s. Minimum is 45s."
+              )
+
+          if duration > 60:
+              raise SystemExit(
+                  f"ERROR: Video is {duration:.2f}s. Maximum is 60s."
+              )
+
+          print("Duration validation: OK")
+          PY
 
       - name: Upload final Short
         uses: actions/upload-artifact@v4
         with:
-          name: final-short-test
+          name: final-short-${{ github.run_id }}
           path: final-short.mp4
+          retention-days: 7
