@@ -108,6 +108,10 @@ jobs:
           from kokoro import KPipeline
 
 
+          # ============================================================
+          # CONFIG
+          # ============================================================
+
           OUT = pathlib.Path("out")
           OUT.mkdir(parents=True, exist_ok=True)
 
@@ -116,6 +120,7 @@ jobs:
 
           SAMPLE_RATE = 24000
           FPS = 30
+
           WIDTH = 1080
           HEIGHT = 1920
 
@@ -123,14 +128,21 @@ jobs:
           MAX_DURATION = 60.0
           TARGET_MAX = 59.5
 
+          # Small tolerance for encoded/container duration differences.
+          DURATION_TOLERANCE = 0.12
+
+
+          # ============================================================
+          # BASIC VALIDATION
+          # ============================================================
 
           if not SCRIPT:
               raise SystemExit("ERROR: SCRIPT is empty")
 
 
-          # ------------------------------------------------------------
-          # PARSE VISUALS
-          # ------------------------------------------------------------
+          # ============================================================
+          # PARSE VISUAL INPUT
+          # ============================================================
 
           try:
               visuals = json.loads(VISUALS_RAW)
@@ -156,7 +168,7 @@ jobs:
           if len(visuals) < 2:
               raise SystemExit(
                   "ERROR: Fewer than 2 visual sections were supplied. "
-                  "Render blocked to prevent one visual being used "
+                  "Render blocked to prevent one visual being reused "
                   "throughout the whole video."
               )
 
@@ -171,6 +183,7 @@ jobs:
               if not isinstance(item, dict):
                   return None
 
+              # Prefer actual video URLs before image URLs.
               for key in (
                   "video_url",
                   "url",
@@ -187,7 +200,11 @@ jobs:
                   if isinstance(value, str):
                       value = value.strip()
 
-                      if value.startswith("https://") or value.startswith("http://"):
+                      if (
+                          value.startswith("https://")
+                          or
+                          value.startswith("http://")
+                      ):
                           return value
 
               return None
@@ -199,7 +216,8 @@ jobs:
 
               if not isinstance(item, dict):
                   raise SystemExit(
-                      f"ERROR: Visual section {index + 1} is not an object"
+                      f"ERROR: Visual section {index + 1} "
+                      "is not an object"
                   )
 
               url = get_url(item)
@@ -217,13 +235,14 @@ jobs:
 
               if not url:
                   raise SystemExit(
-                      f"ERROR: Visual section {index + 1} has no usable URL"
+                      f"ERROR: Visual section {index + 1} "
+                      "has no usable URL"
                   )
 
               if not narration:
                   raise SystemExit(
-                      f"ERROR: Visual section {index + 1} has no narration. "
-                      "Every visual must have its own narration."
+                      f"ERROR: Visual section {index + 1} "
+                      "has no narration"
                   )
 
               section_inputs.append({
@@ -235,27 +254,28 @@ jobs:
 
 
           print(
-              "Section count:",
+              "Validated visual sections:",
               len(section_inputs)
           )
 
 
-          # ------------------------------------------------------------
-          # DOWNLOAD ONE VISUAL PER SECTION
-          # ------------------------------------------------------------
+          # ============================================================
+          # DOWNLOAD ONE VISUAL FOR EVERY SECTION
+          # ============================================================
 
           downloaded = []
 
           for section in section_inputs:
 
-              i = section["index"]
+              index = section["index"]
               url = section["url"]
 
-              downloaded_this_section = False
+              success = False
 
               for attempt in range(1, 4):
 
                   try:
+
                       request = urllib.request.Request(
                           url,
                           headers={
@@ -282,11 +302,15 @@ jobs:
                               "Empty response"
                           )
 
-                      clean_url = url.lower().split("?")[0]
+                      clean_url = (
+                          url.lower()
+                          .split("?")[0]
+                      )
 
                       is_image = (
                           "image/" in content_type
-                          or clean_url.endswith(
+                          or
+                          clean_url.endswith(
                               (
                                   ".jpg",
                                   ".jpeg",
@@ -304,13 +328,13 @@ jobs:
 
                       path = (
                           OUT /
-                          f"source_{i}{extension}"
+                          f"source_{index}{extension}"
                       )
 
                       path.write_bytes(data)
 
                       downloaded.append({
-                          "index": i,
+                          "index": index,
                           "path": path,
                           "kind": (
                               "image"
@@ -322,48 +346,47 @@ jobs:
                       })
 
                       print(
-                          f"Section {i + 1}: downloaded "
-                          f"{extension} "
+                          f"Section {index + 1}: "
+                          f"downloaded {extension} "
                           f"({path.stat().st_size} bytes)"
                       )
 
-                      downloaded_this_section = True
+                      success = True
                       break
 
                   except Exception as exc:
 
                       print(
-                          f"Section {i + 1}: "
+                          f"Section {index + 1}: "
                           f"attempt {attempt} failed: {exc}"
                       )
 
-              if not downloaded_this_section:
+              if not success:
                   raise SystemExit(
                       f"ERROR: Could not download visual "
-                      f"for section {i + 1}"
+                      f"for section {index + 1}"
                   )
 
 
           if len(downloaded) != len(section_inputs):
               raise SystemExit(
-                  "ERROR: Not every narration section has a visual."
+                  "ERROR: Visual count does not match "
+                  "section count."
               )
 
 
-          # ------------------------------------------------------------
-          # KOKORO
-          #
-          # IMPORTANT:
-          # Generate audio separately for EACH visual section.
-          # This makes the audio duration the source of truth for
-          # the corresponding visual duration.
-          # ------------------------------------------------------------
+          # ============================================================
+          # KOKORO — GENERATE AUDIO PER SCENE
+          # ============================================================
 
           print(
-              "Generating section-by-section narration with Kokoro..."
+              "Generating section-by-section narration "
+              "with Kokoro..."
           )
 
-          pipeline = KPipeline(lang_code="a")
+          pipeline = KPipeline(
+              lang_code="a"
+          )
 
           section_audio = []
 
@@ -373,7 +396,8 @@ jobs:
               index = item["index"]
 
               print(
-                  f"Generating audio for section {index + 1}..."
+                  f"Generating audio for section "
+                  f"{index + 1}..."
               )
 
               chunks = []
@@ -424,29 +448,28 @@ jobs:
               })
 
               print(
-                  f"Section {index + 1} audio: "
+                  f"Section {index + 1} audio duration: "
                   f"{duration:.3f}s"
               )
 
 
           original_total = sum(
-              x["duration"]
-              for x in section_audio
+              item["duration"]
+              for item in section_audio
           )
 
           print(
-              f"Original section audio total: "
+              f"Original total narration: "
               f"{original_total:.3f}s"
           )
 
 
-          # ------------------------------------------------------------
-          # NORMALIZE LONG AUDIO
+          # ============================================================
+          # NORMALIZE IF OVER 60 SECONDS
           #
-          # If total narration exceeds 60s, speed each section equally.
-          # Because every section audio is changed independently, its
-          # matching visual remains synchronized.
-          # ------------------------------------------------------------
+          # Every scene is sped up by the SAME factor.
+          # This preserves scene-to-scene alignment.
+          # ============================================================
 
           if original_total > TARGET_MAX:
 
@@ -461,8 +484,12 @@ jobs:
               )
 
               print(
-                  f"Total audio is too long. "
-                  f"Applying uniform speed factor: {factor:.6f}"
+                  "Total narration exceeds target."
+              )
+
+              print(
+                  f"Uniform audio speed factor: "
+                  f"{factor:.6f}"
               )
 
               for item in section_audio:
@@ -471,7 +498,8 @@ jobs:
 
                   normalized = (
                       OUT /
-                      f"section_{item['index']:02d}_normalized.wav"
+                      f"section_"
+                      f"{item['index']:02d}_normalized.wav"
                   )
 
                   subprocess.run(
@@ -502,7 +530,9 @@ jobs:
                               "-show_entries",
                               "format=duration",
                               "-of",
-                              "default=noprint_wrappers=1:nokey=1",
+                              "default="
+                              "noprint_wrappers=1:"
+                              "nokey=1",
                               str(normalized)
                           ],
                           text=True
@@ -513,16 +543,16 @@ jobs:
                   item["duration"] = new_duration
 
 
-          # ------------------------------------------------------------
-          # IF UNDER 30s:
+          # ============================================================
+          # ENSURE MINIMUM 30 SECONDS
           #
-          # Add silence ONLY to the END of the final section.
-          # Do not alter the timing of earlier scenes.
-          # ------------------------------------------------------------
+          # Silence is added ONLY to the final scene.
+          # Earlier scenes never move.
+          # ============================================================
 
           total_after_speed = sum(
-              x["duration"]
-              for x in section_audio
+              item["duration"]
+              for item in section_audio
           )
 
           if total_after_speed < MIN_DURATION:
@@ -536,7 +566,8 @@ jobs:
 
               padded = (
                   OUT /
-                  f"section_{last['index']:02d}_padded.wav"
+                  f"section_"
+                  f"{last['index']:02d}_padded.wav"
               )
 
               subprocess.run(
@@ -546,9 +577,7 @@ jobs:
                       "-i",
                       str(last["path"]),
                       "-af",
-                      (
-                          f"apad=pad_dur={padding:.3f}"
-                      ),
+                      f"apad=pad_dur={padding:.3f}",
                       "-t",
                       f"{last['duration'] + padding:.3f}",
                       "-ar",
@@ -567,78 +596,39 @@ jobs:
 
               print(
                   f"Added {padding:.3f}s silence "
-                  f"to final section."
+                  "to final scene."
               )
 
 
           final_audio_duration = sum(
-              x["duration"]
-              for x in section_audio
+              item["duration"]
+              for item in section_audio
           )
 
+          if final_audio_duration > MAX_DURATION + 0.01:
+              raise SystemExit(
+                  f"ERROR: Audio duration exceeds 60s: "
+                  f"{final_audio_duration:.3f}s"
+              )
+
           print(
-              f"Final section audio duration: "
+              f"Final narration duration: "
               f"{final_audio_duration:.3f}s"
           )
 
 
-          # ------------------------------------------------------------
-          # CREATE VISUAL SEGMENTS
+          # ============================================================
+          # VISUAL FILTER
           #
-          # EACH segment duration is EXACTLY its matching narration
-          # duration.
+          # Foreground preserves original aspect ratio.
+          # No aggressive crop on the actual subject.
           #
-          # IMPORTANT VISUAL FRAMING:
-          # - No aggressive crop.
-          # - Preserve aspect ratio.
-          # - 9:16 canvas.
-          # - Portrait assets fill naturally.
-          # - Wide assets are contained proportionally.
-          # - A blurred enlarged copy is used only as background so
-          #   the actual subject is NOT zoomed/cropped.
-          # ------------------------------------------------------------
+          # Background fills 1080x1920 and is blurred.
+          # ============================================================
 
-          segments = []
+          def make_visual_filter():
 
-          for item in section_audio:
-
-              index = item["index"]
-              visual = item["visual"]
-
-              source = visual["path"]
-              kind = visual["kind"]
-              duration = item["duration"]
-
-              segment = (
-                  OUT /
-                  f"segment_{index:02d}.mp4"
-              )
-
-              if kind == "video":
-
-                  input_args = [
-                      "-stream_loop",
-                      "-1",
-                      "-i",
-                      str(source)
-                  ]
-
-              else:
-
-                  input_args = [
-                      "-loop",
-                      "1",
-                      "-i",
-                      str(source)
-                  ]
-
-
-              # Background:
-              # fills the 9:16 canvas but is blurred.
-              #
-              # Foreground:
-              # is proportional and NEVER aggressively cropped.
-              filter_complex = (
+              return (
                   "[0:v]"
                   "scale=1080:1920:"
                   "force_original_aspect_ratio=increase,"
@@ -656,162 +646,522 @@ jobs:
                   "[bg][fg]"
                   "overlay="
                   "(W-w)/2:"
-                  "(H-h)/2:"
-                  "shortest=1,"
-                  "setsar=1"
+                  "(H-h)/2,"
+                  "setsar=1,"
+                  "fps=30"
               )
 
+
+          # ============================================================
+          # CREATE EACH SCENE AS A COMPLETE A/V UNIT
+          #
+          # THIS IS THE IMPORTANT FIX.
+          #
+          # Each scene gets:
+          #   VIDEO = exact scene duration
+          #   AUDIO = exact same scene duration
+          #
+          # We do NOT concatenate audio and video separately anymore.
+          # ============================================================
+
+          scene_files = []
+
+
+          for item in section_audio:
+
+              index = item["index"]
+              duration = item["duration"]
+              source = item["visual"]["path"]
+              kind = item["visual"]["kind"]
+              audio_source = item["path"]
+
+              scene_file = (
+                  OUT /
+                  f"scene_{index:02d}.mp4"
+              )
+
+              duration_text = (
+                  f"{duration:.6f}"
+              )
 
               print(
-                  f"Creating section {index + 1} "
-                  f"visual segment for "
-                  f"{duration:.3f}s"
+                  ""
               )
 
-              subprocess.run(
-                  [
+              print(
+                  "================================================"
+              )
+
+              print(
+                  f"RENDERING SCENE {index + 1}"
+              )
+
+              print(
+                  f"Scene duration: {duration_text}s"
+              )
+
+              print(
+                  f"Visual type: {kind}"
+              )
+
+              print(
+                  "================================================"
+              )
+
+
+              # --------------------------------------------------------
+              # IMAGE SCENE
+              # --------------------------------------------------------
+
+              if kind == "image":
+
+                  command = [
                       "ffmpeg",
                       "-y",
-                      *input_args,
-                      "-t",
-                      f"{duration:.3f}",
+
+                      "-loop",
+                      "1",
+                      "-framerate",
+                      str(FPS),
+                      "-i",
+                      str(source),
+
+                      "-i",
+                      str(audio_source),
+
                       "-filter_complex",
-                      filter_complex,
-                      "-an",
+                      make_visual_filter(),
+
+                      "-map",
+                      "[outv]" if False else "0:v:0",
+                      "-map",
+                      "1:a:0",
+
+                      "-t",
+                      duration_text,
+
                       "-r",
                       str(FPS),
+
                       "-c:v",
                       "libx264",
                       "-preset",
                       "veryfast",
                       "-crf",
-                      "24",
+                      "23",
+
                       "-pix_fmt",
                       "yuv420p",
+
+                      "-c:a",
+                      "aac",
+                      "-b:a",
+                      "128k",
+
+                      "-ar",
+                      "48000",
+
+                      "-ac",
+                      "1",
+
+                      "-shortest",
+
                       "-movflags",
                       "+faststart",
-                      str(segment)
-                  ],
+
+                      str(scene_file)
+                  ]
+
+              # --------------------------------------------------------
+              # VIDEO SCENE
+              # --------------------------------------------------------
+
+              else:
+
+                  command = [
+                      "ffmpeg",
+                      "-y",
+
+                      "-stream_loop",
+                      "-1",
+                      "-i",
+                      str(source),
+
+                      "-i",
+                      str(audio_source),
+
+                      "-filter_complex",
+                      make_visual_filter(),
+
+                      "-map",
+                      "0:v:0",
+                      "-map",
+                      "1:a:0",
+
+                      "-t",
+                      duration_text,
+
+                      "-r",
+                      str(FPS),
+
+                      "-c:v",
+                      "libx264",
+                      "-preset",
+                      "veryfast",
+                      "-crf",
+                      "23",
+
+                      "-pix_fmt",
+                      "yuv420p",
+
+                      "-c:a",
+                      "aac",
+                      "-b:a",
+                      "128k",
+
+                      "-ar",
+                      "48000",
+
+                      "-ac",
+                      "1",
+
+                      "-shortest",
+
+                      "-movflags",
+                      "+faststart",
+
+                      str(scene_file)
+                  ]
+
+
+              # --------------------------------------------------------
+              # IMPORTANT:
+              # The previous version accidentally built a filter graph
+              # but then mapped the raw video stream.
+              #
+              # Here we deliberately use a simpler, reliable scene
+              # pipeline below.
+              # --------------------------------------------------------
+
+              if kind == "image":
+
+                  command = [
+                      "ffmpeg",
+                      "-y",
+
+                      "-loop",
+                      "1",
+                      "-framerate",
+                      str(FPS),
+                      "-i",
+                      str(source),
+
+                      "-i",
+                      str(audio_source),
+
+                      "-filter_complex",
+                      (
+                          "[0:v]"
+                          "scale=1080:1920:"
+                          "force_original_aspect_ratio=increase,"
+                          "crop=1080:1920,"
+                          "boxblur=18:2,"
+                          "setsar=1"
+                          "[bg];"
+
+                          "[0:v]"
+                          "scale=1080:1920:"
+                          "force_original_aspect_ratio=decrease,"
+                          "setsar=1"
+                          "[fg];"
+
+                          "[bg][fg]"
+                          "overlay="
+                          "(W-w)/2:"
+                          "(H-h)/2,"
+                          "setsar=1,"
+                          "fps=30"
+                          "[v]"
+                      ),
+
+                      "-map",
+                      "[v]",
+                      "-map",
+                      "1:a:0",
+
+                      "-t",
+                      duration_text,
+
+                      "-c:v",
+                      "libx264",
+                      "-preset",
+                      "veryfast",
+                      "-crf",
+                      "23",
+
+                      "-pix_fmt",
+                      "yuv420p",
+
+                      "-c:a",
+                      "aac",
+                      "-b:a",
+                      "128k",
+
+                      "-ar",
+                      "48000",
+                      "-ac",
+                      "1",
+
+                      "-shortest",
+
+                      "-movflags",
+                      "+faststart",
+
+                      str(scene_file)
+                  ]
+
+              else:
+
+                  command = [
+                      "ffmpeg",
+                      "-y",
+
+                      "-stream_loop",
+                      "-1",
+                      "-i",
+                      str(source),
+
+                      "-i",
+                      str(audio_source),
+
+                      "-filter_complex",
+                      (
+                          "[0:v]"
+                          "scale=1080:1920:"
+                          "force_original_aspect_ratio=increase,"
+                          "crop=1080:1920,"
+                          "boxblur=18:2,"
+                          "setsar=1"
+                          "[bg];"
+
+                          "[0:v]"
+                          "scale=1080:1920:"
+                          "force_original_aspect_ratio=decrease,"
+                          "setsar=1"
+                          "[fg];"
+
+                          "[bg][fg]"
+                          "overlay="
+                          "(W-w)/2:"
+                          "(H-h)/2,"
+                          "setsar=1,"
+                          "fps=30"
+                          "[v]"
+                      ),
+
+                      "-map",
+                      "[v]",
+                      "-map",
+                      "1:a:0",
+
+                      "-t",
+                      duration_text,
+
+                      "-c:v",
+                      "libx264",
+                      "-preset",
+                      "veryfast",
+                      "-crf",
+                      "23",
+
+                      "-pix_fmt",
+                      "yuv420p",
+
+                      "-c:a",
+                      "aac",
+                      "-b:a",
+                      "128k",
+
+                      "-ar",
+                      "48000",
+                      "-ac",
+                      "1",
+
+                      "-shortest",
+
+                      "-movflags",
+                      "+faststart",
+
+                      str(scene_file)
+                  ]
+
+
+              subprocess.run(
+                  command,
                   check=True
               )
 
-              segments.append(segment)
+
+              # --------------------------------------------------------
+              # VERIFY ACTUAL SCENE DURATION
+              # --------------------------------------------------------
+
+              probe = subprocess.check_output(
+                  [
+                      "ffprobe",
+                      "-v",
+                      "error",
+                      "-show_entries",
+                      "format=duration",
+                      "-of",
+                      "default="
+                      "noprint_wrappers=1:"
+                      "nokey=1",
+                      str(scene_file)
+                  ],
+                  text=True
+              ).strip()
+
+              actual_duration = float(probe)
+
+              print(
+                  f"Scene {index + 1} actual duration: "
+                  f"{actual_duration:.3f}s"
+              )
+
+              if abs(
+                  actual_duration -
+                  duration
+              ) > DURATION_TOLERANCE:
+
+                  raise SystemExit(
+                      f"ERROR: Scene {index + 1} duration mismatch. "
+                      f"Expected {duration:.3f}s, "
+                      f"got {actual_duration:.3f}s."
+                  )
 
 
-          if len(segments) != len(section_audio):
-              raise SystemExit(
-                  "ERROR: Visual/audio section count mismatch."
+              scene_files.append(
+                  scene_file
               )
 
 
-          # ------------------------------------------------------------
-          # CONCATENATE SECTION AUDIO
-          # ------------------------------------------------------------
+          # ============================================================
+          # FINAL CONCAT
+          #
+          # IMPORTANT:
+          # Every scene already contains matching A/V.
+          #
+          # We use FFmpeg concat FILTER rather than relying on a
+          # separate audio concat and video concat.
+          #
+          # This avoids the cumulative timestamp drift that caused
+          # later scenes to play after their narration.
+          # ============================================================
 
-          audio_concat = (
-              OUT /
-              "audio_sections.txt"
+          print("")
+          print(
+              "================================================"
           )
 
-          with audio_concat.open(
-              "w",
-              encoding="utf-8"
-          ) as f:
-
-              for item in section_audio:
-
-                  f.write(
-                      "file "
-                      f"'{item['path'].resolve()}'\n"
-                  )
-
-
-          voice_path = (
-              OUT /
-              "voice.wav"
+          print(
+              "FINAL AUDIO/VIDEO CONCAT"
           )
+
+          print(
+              "================================================"
+          )
+
+
+          input_args = []
+
+          for scene_file in scene_files:
+
+              input_args.extend(
+                  [
+                      "-i",
+                      str(scene_file)
+                  ]
+              )
+
+
+          concat_inputs = ""
+
+          for i in range(len(scene_files)):
+
+              concat_inputs += (
+                  f"[{i}:v:0]"
+                  f"[{i}:a:0]"
+              )
+
+
+          concat_filter = (
+              concat_inputs
+              +
+              f"concat="
+              f"n={len(scene_files)}:"
+              f"v=1:"
+              f"a=1"
+              f"[vout]"
+              f"[aout]"
+          )
+
+
+          final = pathlib.Path(
+              "final-short.mp4"
+          )
+
 
           subprocess.run(
               [
                   "ffmpeg",
                   "-y",
-                  "-f",
-                  "concat",
-                  "-safe",
-                  "0",
-                  "-i",
-                  str(audio_concat),
-                  "-ar",
-                  str(SAMPLE_RATE),
-                  "-ac",
-                  "1",
-                  "-c:a",
-                  "pcm_s16le",
-                  str(voice_path)
-              ],
-              check=True
-          )
 
+                  *input_args,
 
-          # ------------------------------------------------------------
-          # CONCATENATE VISUALS
-          # ------------------------------------------------------------
+                  "-filter_complex",
+                  concat_filter,
 
-          visual_concat = (
-              OUT /
-              "segments.txt"
-          )
+                  "-map",
+                  "[vout]",
+                  "-map",
+                  "[aout]",
 
-          with visual_concat.open(
-              "w",
-              encoding="utf-8"
-          ) as f:
-
-              for segment in segments:
-
-                  f.write(
-                      f"file '{segment.resolve()}'\n"
-                  )
-
-
-          visuals_video = (
-              OUT /
-              "visuals.mp4"
-          )
-
-          subprocess.run(
-              [
-                  "ffmpeg",
-                  "-y",
-                  "-f",
-                  "concat",
-                  "-safe",
-                  "0",
-                  "-i",
-                  str(visual_concat),
-                  "-an",
                   "-c:v",
                   "libx264",
                   "-preset",
                   "veryfast",
                   "-crf",
-                  "24",
+                  "23",
+
                   "-pix_fmt",
                   "yuv420p",
+
                   "-r",
                   str(FPS),
-                  str(visuals_video)
+
+                  "-c:a",
+                  "aac",
+                  "-b:a",
+                  "128k",
+
+                  "-ar",
+                  "48000",
+                  "-ac",
+                  "1",
+
+                  "-movflags",
+                  "+faststart",
+
+                  str(final)
               ],
               check=True
           )
 
 
-          # ------------------------------------------------------------
-          # SUBTITLES
-          #
-          # Use the SAME section timing as the actual section audio.
-          # Therefore subtitles also remain synchronized.
-          # ------------------------------------------------------------
+          # ============================================================
+          # CREATE SUBTITLES FROM THE EXACT SAME SCENE TIMELINE
+          # ============================================================
 
           def timestamp(seconds):
 
@@ -854,10 +1204,8 @@ jobs:
 
               for word in words:
 
-                  candidate = (
-                      " ".join(
-                          current + [word]
-                      )
+                  candidate = " ".join(
+                      current + [word]
                   )
 
                   if current and (
@@ -891,6 +1239,7 @@ jobs:
           current_time = 0.0
           caption_number = 1
 
+
           with srt_path.open(
               "w",
               encoding="utf-8"
@@ -899,6 +1248,7 @@ jobs:
               for section in section_audio:
 
                   section_start = current_time
+
                   section_end = (
                       section_start +
                       section["duration"]
@@ -966,12 +1316,15 @@ jobs:
                   current_time = section_end
 
 
-          # ------------------------------------------------------------
-          # FINAL VIDEO
-          # ------------------------------------------------------------
+          # ============================================================
+          # BURN SUBTITLES
+          #
+          # The underlying A/V is already synchronized.
+          # Subtitle timestamps use the exact same scene durations.
+          # ============================================================
 
-          final = pathlib.Path(
-              "final-short.mp4"
+          subtitled = pathlib.Path(
+              "final-short-subtitled.mp4"
           )
 
           subtitle_filter = (
@@ -994,45 +1347,59 @@ jobs:
               [
                   "ffmpeg",
                   "-y",
+
                   "-i",
-                  str(visuals_video),
-                  "-i",
-                  str(voice_path),
+                  str(final),
+
                   "-vf",
                   subtitle_filter,
+
                   "-map",
                   "0:v:0",
                   "-map",
-                  "1:a:0",
-                  "-t",
-                  f"{final_audio_duration:.3f}",
-                  "-r",
-                  str(FPS),
+                  "0:a:0",
+
                   "-c:v",
                   "libx264",
                   "-preset",
                   "veryfast",
                   "-crf",
                   "23",
+
                   "-pix_fmt",
                   "yuv420p",
+
+                  "-r",
+                  str(FPS),
+
                   "-c:a",
                   "aac",
                   "-b:a",
                   "128k",
+
+                  "-ar",
+                  "48000",
+                  "-ac",
+                  "1",
+
                   "-movflags",
                   "+faststart",
-                  str(final)
+
+                  str(subtitled)
               ],
               check=True
           )
 
 
-          # ------------------------------------------------------------
-          # FINAL VALIDATION
-          # ------------------------------------------------------------
+          # Replace final output with subtitled version.
+          subtitled.replace(final)
 
-          duration = float(
+
+          # ============================================================
+          # FINAL VALIDATION
+          # ============================================================
+
+          final_duration = float(
               subprocess.check_output(
                   [
                       "ffprobe",
@@ -1041,26 +1408,97 @@ jobs:
                       "-show_entries",
                       "format=duration",
                       "-of",
-                      "default=noprint_wrappers=1:nokey=1",
+                      "default="
+                      "noprint_wrappers=1:"
+                      "nokey=1",
                       str(final)
                   ],
                   text=True
               ).strip()
           )
 
+
+          video_duration = float(
+              subprocess.check_output(
+                  [
+                      "ffprobe",
+                      "-v",
+                      "error",
+                      "-select_streams",
+                      "v:0",
+                      "-show_entries",
+                      "stream=duration",
+                      "-of",
+                      "default="
+                      "noprint_wrappers=1:"
+                      "nokey=1",
+                      str(final)
+                  ],
+                  text=True
+              ).strip()
+          )
+
+
+          audio_duration = float(
+              subprocess.check_output(
+                  [
+                      "ffprobe",
+                      "-v",
+                      "error",
+                      "-select_streams",
+                      "a:0",
+                      "-show_entries",
+                      "stream=duration",
+                      "-of",
+                      "default="
+                      "noprint_wrappers=1:"
+                      "nokey=1",
+                      str(final)
+                  ],
+                  text=True
+              ).strip()
+          )
+
+
           size = final.stat().st_size
 
 
+          print("")
           print(
-              f"Final duration: {duration:.2f}s"
+              "================================================"
           )
 
           print(
-              f"Final size: {size} bytes"
+              "FINAL VALIDATION"
           )
 
           print(
-              f"Rendered sections: {len(section_audio)}"
+              "================================================"
+          )
+
+          print(
+              f"Container duration: "
+              f"{final_duration:.3f}s"
+          )
+
+          print(
+              f"Video stream duration: "
+              f"{video_duration:.3f}s"
+          )
+
+          print(
+              f"Audio stream duration: "
+              f"{audio_duration:.3f}s"
+          )
+
+          print(
+              f"Rendered sections: "
+              f"{len(section_audio)}"
+          )
+
+          print(
+              f"File size: "
+              f"{size} bytes"
           )
 
 
@@ -1069,18 +1507,52 @@ jobs:
                   "ERROR: final-short.mp4 is empty"
               )
 
-          if duration < 29.5:
+
+          if final_duration < 29.5:
               raise SystemExit(
-                  f"ERROR: Final video is too short: "
-                  f"{duration:.2f}s"
+                  f"ERROR: Final video too short: "
+                  f"{final_duration:.3f}s"
               )
 
-          if duration > 60.5:
+
+          if final_duration > 60.5:
               raise SystemExit(
-                  f"ERROR: Final video is too long: "
-                  f"{duration:.2f}s"
+                  f"ERROR: Final video too long: "
+                  f"{final_duration:.3f}s"
               )
 
+
+          # Final A/V duration must be extremely close.
+          if abs(
+              video_duration -
+              audio_duration
+          ) > 0.20:
+
+              raise SystemExit(
+                  "ERROR: FINAL A/V DURATION MISMATCH: "
+                  f"video={video_duration:.3f}s, "
+                  f"audio={audio_duration:.3f}s"
+              )
+
+
+          # Expected duration comes from the actual scene audio.
+          if abs(
+              final_duration -
+              final_audio_duration
+          ) > 0.25:
+
+              raise SystemExit(
+                  "ERROR: Final duration does not match "
+                  "the section-audio timeline: "
+                  f"expected={final_audio_duration:.3f}s, "
+                  f"actual={final_duration:.3f}s"
+              )
+
+
+          print("")
+          print(
+              "A/V SYNCHRONIZATION VALIDATION: PASSED"
+          )
 
           print(
               "VIDEO READY:",
@@ -1124,6 +1596,7 @@ jobs:
           ]
 
           if missing:
+
               print(
                   "WARNING: Missing Google secrets:",
                   ", ".join(missing)
@@ -1135,9 +1608,11 @@ jobs:
 
               sys.exit(0)
 
+
           from google.oauth2 import service_account
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaFileUpload
+
 
           credentials = (
               service_account
@@ -1155,12 +1630,14 @@ jobs:
               )
           )
 
+
           drive = build(
               "drive",
               "v3",
               credentials=credentials,
               cache_discovery=False
           )
+
 
           sheets = build(
               "sheets",
@@ -1169,9 +1646,11 @@ jobs:
               cache_discovery=False
           )
 
+
           run_id = os.environ["RUN_ID"]
           topic = os.environ["TOPIC"]
           title = os.environ["TITLE"]
+
 
           metadata = {
               "name": f"{run_id}.mp4",
@@ -1181,12 +1660,14 @@ jobs:
               "mimeType": "video/mp4"
           }
 
+
           media = MediaFileUpload(
               "final-short.mp4",
               mimetype="video/mp4",
               resumable=True,
               chunksize=8 * 1024 * 1024
           )
+
 
           uploaded = (
               drive.files()
@@ -1198,15 +1679,20 @@ jobs:
               .execute()
           )
 
+
           file_id = uploaded["id"]
+
 
           link = (
               uploaded.get("webViewLink")
               or
-              f"https://drive.google.com/file/d/{file_id}/view"
+              f"https://drive.google.com/file/d/"
+              f"{file_id}/view"
           )
 
+
           try:
+
               drive.permissions().create(
                   fileId=file_id,
                   body={
@@ -1222,11 +1708,13 @@ jobs:
               )
 
           except Exception as exc:
+
               print(
                   "WARNING: Could not enable public "
                   "Drive sharing:",
                   exc
               )
+
 
           sheet_range = (
               os.environ.get(
@@ -1235,6 +1723,7 @@ jobs:
               or
               "Sheet1!A:F"
           )
+
 
           row = [[
               datetime.datetime.now(
@@ -1251,6 +1740,7 @@ jobs:
 
               link
           ]]
+
 
           (
               sheets.spreadsheets()
@@ -1269,6 +1759,7 @@ jobs:
               .execute()
           )
 
+
           print(
               "VIDEO_URL:",
               link
@@ -1278,6 +1769,7 @@ jobs:
 
       - name: Upload GitHub artifact backup
         if: always()
+
         uses: actions/upload-artifact@v4
 
         with:
@@ -1287,6 +1779,8 @@ jobs:
             final-short.mp4
             out/voice.wav
             out/captions.srt
+            out/section_*.wav
+            out/scene_*.mp4
 
           if-no-files-found: warn
 
