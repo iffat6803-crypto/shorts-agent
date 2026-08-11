@@ -7,119 +7,82 @@ on:
         description: "Unique run ID"
         required: true
         type: string
-
       topic:
         description: "Video topic"
         required: true
         type: string
-
       script:
         description: "Complete narration script"
         required: true
         type: string
-
       title:
         description: "Video title"
         required: true
         type: string
-
       visuals:
-        description: "JSON visual sections"
+        description: "JSON array of per-section visual assets"
         required: true
         type: string
 
 jobs:
   render:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 20
 
     permissions:
       contents: read
 
     steps:
-
       - name: Checkout
         uses: actions/checkout@v4
 
-
       - name: Install system packages
         run: |
-          set -e
-
           sudo apt-get update
-          sudo apt-get install -y \
-            ffmpeg \
-            curl \
-            ca-certificates \
-            python3-pip \
-            python3-dev \
-            build-essential
+          sudo apt-get install -y ffmpeg espeak-ng python3-pip
+          ffmpeg -version | head -n 1
+          ffprobe -version | head -n 1
 
+      - name: Install Python packages
+        run: |
           python3 -m pip install --upgrade pip
-
-          python3 -m pip install \
+          python3 -m pip install --no-cache-dir \
             "kokoro>=0.9.4" \
             soundfile \
-            torch \
             numpy \
+            torch \
             google-api-python-client \
             google-auth \
             google-auth-httplib2 \
             google-auth-oauthlib
 
+      - name: Verify Python packages
+        run: |
+          python3 - <<'PY'
+          import sys
+          import numpy
+          import soundfile
+          import torch
+          import kokoro
+
+          print("Python:", sys.version)
+          print("numpy:", numpy.__version__)
+          print("soundfile:", soundfile.__version__)
+          print("torch:", torch.__version__)
+          print("kokoro:", getattr(kokoro, "__version__", "installed"))
+          PY
 
       - name: Show received inputs
         env:
           RUN_ID: ${{ inputs.run_id }}
           TOPIC: ${{ inputs.topic }}
           TITLE: ${{ inputs.title }}
-          VISUALS_JSON: ${{ inputs.visuals }}
+          SCRIPT: ${{ inputs.script }}
         run: |
-          set -e
-
-          echo "========================================"
-          echo "RECEIVED INPUTS"
-          echo "========================================"
           echo "Run ID: $RUN_ID"
           echo "Topic: $TOPIC"
           echo "Title: $TITLE"
-
-          python3 - <<'PY'
-          import os
-          import json
-
-          raw = os.environ["VISUALS_JSON"]
-
-          try:
-              data = json.loads(raw)
-          except Exception as e:
-              raise SystemExit(f"Invalid visuals JSON: {e}")
-
-          if isinstance(data, dict):
-              data = [data]
-
-          if not isinstance(data, list):
-              raise SystemExit("Visuals must be a JSON list.")
-
-          print("Visual sections received:", len(data))
-
-          for i, item in enumerate(data):
-              if not isinstance(item, dict):
-                  print(f"Section {i + 1}: invalid object")
-                  continue
-
-              print(f"Section {i + 1}:")
-              print("  narration:", bool(item.get("narration")))
-              print("  query:", item.get("query", ""))
-              print("  video_url:", bool(item.get("video_url")))
-              print("  url:", bool(item.get("url")))
-              print("  image_url:", bool(item.get("image_url")))
-              print("  image:", bool(item.get("image")))
-              print("  video_files:", bool(item.get("video_files")))
-
-          print("========================================")
-          PY
-
+          echo "Script words: $(printf '%s' "$SCRIPT" | wc -w)"
 
       - name: Render Short
         env:
@@ -130,1190 +93,818 @@ jobs:
           VISUALS_JSON: ${{ inputs.visuals }}
 
         run: |
-          set -e
-
-          python3 - <<'PY'
-          import os
+          cat > render.py <<'PY'
           import json
+          import math
+          import os
+          import pathlib
           import re
           import subprocess
-          import pathlib
-          import math
-
+          import urllib.request
           import numpy as np
           import soundfile as sf
 
           from kokoro import KPipeline
 
+          OUT = pathlib.Path("out")
+          OUT.mkdir(parents=True, exist_ok=True)
 
-          # ============================================================
-          # HELPERS
-          # ============================================================
+          SCRIPT = os.environ.get("SCRIPT", "").strip()
+          VISUALS_RAW = os.environ.get("VISUALS_JSON", "").strip()
 
-          def run(cmd):
-              print("\nRUN:", " ".join(map(str, cmd)))
-              subprocess.run(cmd, check=True)
-
-
-          def probe_duration(path):
-              result = subprocess.run(
-                  [
-                      "ffprobe",
-                      "-v", "error",
-                      "-show_entries", "format=duration",
-                      "-of", "default=noprint_wrappers=1:nokey=1",
-                      str(path)
-                  ],
-                  capture_output=True,
-                  text=True,
-                  check=True
-              )
-
-              value = result.stdout.strip()
-
-              if not value:
-                  raise RuntimeError(f"Could not read duration: {path}")
-
-              return float(value)
-
-
-          def timestamp(seconds):
-              seconds = max(0.0, float(seconds))
-
-              total_ms = int(round(seconds * 1000))
-
-              hours = total_ms // 3600000
-              total_ms %= 3600000
-
-              minutes = total_ms // 60000
-              total_ms %= 60000
-
-              secs = total_ms // 1000
-              millis = total_ms % 1000
-
-              return (
-                  f"{hours:02d}:{minutes:02d}:"
-                  f"{secs:02d},{millis:03d}"
-              )
-
-
-          def clean_text(text):
-              if not text:
-                  return ""
-
-              text = str(text)
-              text = re.sub(r"\s+", " ", text)
-
-              return text.strip()
-
-
-          def caption_lines(text, max_words=4):
-              words = clean_text(text).split()
-
-              if not words:
-                  return []
-
-              return [
-                  " ".join(words[i:i + max_words])
-                  for i in range(0, len(words), max_words)
-              ]
-
-
-          def first_video_url(value):
-              """
-              Accepts several possible Pexels/n8n formats:
-              - direct string
-              - dict containing url
-              - list of video file dictionaries
-              """
-
-              if not value:
-                  return ""
-
-              if isinstance(value, str):
-                  return value.strip()
-
-              if isinstance(value, dict):
-                  direct = (
-                      value.get("url")
-                      or value.get("link")
-                      or value.get("src")
-                      or ""
-                  )
-
-                  if direct:
-                      return str(direct).strip()
-
-                  files = value.get("video_files")
-
-                  if files:
-                      return first_video_url(files)
-
-                  return ""
-
-              if isinstance(value, list):
-                  candidates = []
-
-                  for item in value:
-                      if not isinstance(item, dict):
-                          continue
-
-                      url = (
-                          item.get("link")
-                          or item.get("url")
-                          or item.get("src")
-                          or ""
-                      )
-
-                      if url:
-                          width = item.get("width") or 0
-                          height = item.get("height") or 0
-
-                          try:
-                              width = int(width)
-                              height = int(height)
-                          except Exception:
-                              width = 0
-                              height = 0
-
-                          portrait = height >= width if width else False
-
-                          candidates.append(
-                              (
-                                  1 if portrait else 0,
-                                  height,
-                                  width,
-                                  str(url).strip()
-                              )
-                          )
-
-                  if candidates:
-                      candidates.sort(reverse=True)
-                      return candidates[0][3]
-
-              return ""
-
-
-          def first_image_url(value):
-              if not value:
-                  return ""
-
-              if isinstance(value, str):
-                  return value.strip()
-
-              if isinstance(value, dict):
-                  for key in (
-                      "url",
-                      "src",
-                      "image",
-                      "image_url"
-                  ):
-                      if value.get(key):
-                          return str(value[key]).strip()
-
-              if isinstance(value, list):
-                  for item in value:
-                      result = first_image_url(item)
-
-                      if result:
-                          return result
-
-              return ""
-
-
-          # ============================================================
-          # INPUTS
-          # ============================================================
-
-          run_id = os.environ["RUN_ID"]
-          topic = clean_text(os.environ["TOPIC"])
-          script = clean_text(os.environ["SCRIPT"])
-
-          raw_visuals = os.environ["VISUALS_JSON"]
-
-          if not script:
-              raise SystemExit("Script is empty.")
+          if not SCRIPT:
+              raise SystemExit("ERROR: SCRIPT is empty")
 
           try:
-              visuals = json.loads(raw_visuals)
-          except Exception as e:
-              raise SystemExit(
-                  f"Invalid visuals JSON: {e}"
-              )
+              visuals = json.loads(VISUALS_RAW)
+          except Exception as exc:
+              raise SystemExit(f"ERROR: VISUALS is not valid JSON: {exc}")
 
           if isinstance(visuals, dict):
-              visuals = [visuals]
+              visuals = (
+                  visuals.get("visuals")
+                  or visuals.get("sections")
+                  or [visuals]
+              )
 
           if not isinstance(visuals, list):
-              raise SystemExit(
-                  "Visuals input must be a JSON list."
-              )
+              raise SystemExit("ERROR: VISUALS must be a JSON array")
 
-          if not visuals:
-              raise SystemExit(
-                  "No visual sections were supplied."
-              )
+          print("Visual assets supplied:", len(visuals))
 
-
-          print("========================================")
-          print("VIDEO RENDER")
-          print("========================================")
-          print("Run ID:", run_id)
-          print("Topic:", topic)
-          print("Visual sections:", len(visuals))
-          print("========================================")
-
-
-          # ============================================================
-          # DIRECTORIES
-          # ============================================================
-
-          out = pathlib.Path("out")
-          out.mkdir(exist_ok=True)
-
-          audio_dir = out / "audio"
-          audio_dir.mkdir(exist_ok=True)
-
-          visual_dir = out / "visuals"
-          visual_dir.mkdir(exist_ok=True)
-
-
-          # ============================================================
-          # NORMALIZE VISUALS
-          # ============================================================
-
-          normalized = []
-
-          for index, item in enumerate(visuals):
-
-              if isinstance(item, str):
-                  item = {
-                      "video_url": item
-                  }
-
+          def get_url(item):
               if not isinstance(item, dict):
-                  print(
-                      f"Skipping invalid visual object "
-                      f"{index + 1}"
-                  )
-                  continue
+                  return None
 
-              narration = clean_text(
-                  item.get("narration")
-                  or item.get("caption")
-                  or ""
-              )
+              # Accept all formats currently used by the n8n pipeline.
+              for key in (
+                  "video_url",
+                  "url",
+                  "video",
+                  "video_link",
+                  "link",
+                  "image_url",
+                  "image",
+                  "image_link",
+                  "thumbnail",
+              ):
+                  value = item.get(key)
 
-              query = clean_text(
-                  item.get("query")
-                  or ""
-              )
+                  if isinstance(value, str):
+                      value = value.strip()
 
-              video_url = (
-                  first_video_url(item.get("video_url"))
-                  or first_video_url(item.get("url"))
-                  or first_video_url(item.get("video"))
-                  or first_video_url(item.get("video_files"))
-              )
+                      if value.startswith("https://") or value.startswith("http://"):
+                          return value
 
-              image_url = (
-                  first_image_url(item.get("image_url"))
-                  or first_image_url(item.get("image"))
-                  or first_image_url(item.get("image_url"))
-              )
+              return None
 
-              normalized.append(
-                  {
-                      "narration": narration,
-                      "query": query,
-                      "video_url": video_url,
-                      "image_url": image_url
-                  }
-              )
+          usable = []
 
-              print(f"\nVisual {index + 1}")
-              print("  Query:", query)
-              print("  Video:", bool(video_url))
-              print("  Image:", bool(image_url))
+          for item in visuals:
+              url = get_url(item)
 
+              if url:
+                  usable.append({
+                      "url": url,
+                      "narration": str(
+                          item.get("narration")
+                          or item.get("text")
+                          or ""
+                      ).strip()
+                  })
 
-          if not normalized:
+          if not usable:
               raise SystemExit(
-                  "No valid visual objects supplied."
+                  "ERROR: No usable visual URLs were supplied"
               )
 
+          # ------------------------------------------------------------
+          # DOWNLOAD VISUALS
+          # ------------------------------------------------------------
 
-          # ============================================================
-          # BUILD SECTION NARRATION
-          # ============================================================
+          downloaded = []
 
-          section_texts = [
-              clean_text(x["narration"])
-              for x in normalized
-          ]
+          for i, item in enumerate(usable[:12]):
 
-          # If n8n didn't provide narration per section,
-          # divide the full script across the sections.
-          if not any(section_texts):
+              url = item["url"]
 
-              sentences = [
-                  clean_text(x)
-                  for x in re.split(
-                      r"(?<=[.!?])\s+",
-                      script
+              for attempt in range(1, 4):
+
+                  try:
+                      request = urllib.request.Request(
+                          url,
+                          headers={
+                              "User-Agent": "Mozilla/5.0"
+                          }
+                      )
+
+                      with urllib.request.urlopen(
+                          request,
+                          timeout=45
+                      ) as response:
+
+                          data = response.read()
+
+                          content_type = (
+                              response.headers.get(
+                                  "Content-Type",
+                                  ""
+                              ).lower()
+                          )
+
+                      if not data:
+                          raise RuntimeError("Empty response")
+
+                      clean_url = url.lower().split("?")[0]
+
+                      is_image = (
+                          "image/" in content_type
+                          or clean_url.endswith(
+                              (
+                                  ".jpg",
+                                  ".jpeg",
+                                  ".png",
+                                  ".webp"
+                              )
+                          )
+                      )
+
+                      extension = ".jpg" if is_image else ".mp4"
+
+                      path = OUT / f"source_{i}{extension}"
+
+                      path.write_bytes(data)
+
+                      downloaded.append({
+                          "path": path,
+                          "kind": "image" if is_image else "video",
+                          "narration": item["narration"]
+                      })
+
+                      print(
+                          f"Visual {i}: downloaded "
+                          f"{extension} "
+                          f"({path.stat().st_size} bytes)"
+                      )
+
+                      break
+
+                  except Exception as exc:
+
+                      print(
+                          f"Visual {i}: "
+                          f"attempt {attempt} failed: {exc}"
+                      )
+
+              else:
+
+                  print(
+                      f"Visual {i}: skipped after 3 attempts"
                   )
-                  if clean_text(x)
-              ]
 
-              section_texts = [
-                  []
-                  for _ in normalized
-              ]
+          if not downloaded:
+              raise SystemExit(
+                  "ERROR: No visual assets could be downloaded"
+              )
 
-              for i, sentence in enumerate(sentences):
-                  section_texts[
-                      i % len(section_texts)
-                  ].append(sentence)
+          # ------------------------------------------------------------
+          # KOKORO TTS
+          # ------------------------------------------------------------
 
-              section_texts = [
-                  " ".join(x)
-                  for x in section_texts
-              ]
-
-
-          # ============================================================
-          # TTS
-          # ============================================================
-
-          print("\nGenerating Kokoro narration...")
+          print("Generating narration with Kokoro...")
 
           pipeline = KPipeline(lang_code="a")
 
-          audio_files = []
-          section_durations = []
+          chunks = []
 
-          for i, text in enumerate(section_texts):
+          for _, _, audio in pipeline(
+              SCRIPT,
+              voice="af_heart",
+              speed=1.0
+          ):
 
-              text = clean_text(text)
+              audio = np.asarray(
+                  audio,
+                  dtype=np.float32
+              ).reshape(-1)
 
-              if not text:
-                  continue
-
-              wav_path = (
-                  audio_dir /
-                  f"section_{i}.wav"
-              )
-
-              chunks = []
-
-              for _, _, audio in pipeline(
-                  text,
-                  voice="af_heart",
-                  speed=1.0
-              ):
+              if audio.size:
                   chunks.append(audio)
 
-              if not chunks:
-                  raise SystemExit(
-                      f"No TTS audio generated "
-                      f"for section {i + 1}."
-                  )
-
-              audio = np.concatenate(chunks)
-
-              sf.write(
-                  wav_path,
-                  audio,
-                  24000
-              )
-
-              duration = probe_duration(
-                  wav_path
-              )
-
-              print(
-                  f"Section {i + 1} audio: "
-                  f"{duration:.2f}s"
-              )
-
-              audio_files.append(wav_path)
-              section_durations.append(duration)
-
-
-          if not audio_files:
+          if not chunks:
               raise SystemExit(
-                  "No audio sections were generated."
+                  "ERROR: Kokoro produced no audio"
               )
 
+          SAMPLE_RATE = 24000
 
-          # ============================================================
-          # CONCAT AUDIO
-          # ============================================================
+          audio = np.concatenate(chunks)
 
-          audio_list = (
-              out / "audio_list.txt"
-          )
-
-          with audio_list.open(
-              "w",
-              encoding="utf-8"
-          ) as f:
-
-              for path in audio_files:
-
-                  safe = (
-                      str(path.resolve())
-                      .replace("'", "'\\''")
-                  )
-
-                  f.write(
-                      f"file '{safe}'\n"
-                  )
-
-
-          full_audio = (
-              out / "voice.wav"
-          )
-
-          run(
-              [
-                  "ffmpeg",
-                  "-y",
-                  "-f", "concat",
-                  "-safe", "0",
-                  "-i", str(audio_list),
-                  "-c:a", "pcm_s16le",
-                  str(full_audio)
-              ]
-          )
-
-
-          original_duration = probe_duration(
-              full_audio
+          original_duration = (
+              len(audio) / SAMPLE_RATE
           )
 
           print(
-              "\nOriginal narration duration:",
+              f"Original narration duration: "
               f"{original_duration:.2f}s"
           )
 
+          audio_path = OUT / "voice.wav"
 
-          # ============================================================
-          # NORMALIZE FINAL DURATION
+          # ------------------------------------------------------------
+          # AUDIO LENGTH
           #
-          # Minimum 30 sec
-          # Maximum 60 sec
+          # Minimum 30 seconds.
+          # Maximum 60 seconds.
           #
-          # We do NOT simply cut the narration at 60 seconds.
-          # ============================================================
+          # IMPORTANT:
+          # We NEVER use atempo to stretch a short narration.
+          # Short narration gets silence at the END.
+          # ------------------------------------------------------------
 
-          processed_audio = (
-              out / "voice_normalized.wav"
-          )
+          if original_duration < 30:
 
-          if original_duration < 30.0:
+              padding_seconds = (
+                  30.0 - original_duration
+              )
 
-              # Slow down moderately.
-              factor = max(
-                  0.70,
-                  original_duration / 30.0
+              padding_samples = int(
+                  math.ceil(
+                      padding_seconds * SAMPLE_RATE
+                  )
+              )
+
+              audio = np.pad(
+                  audio,
+                  (0, padding_samples)
+              )
+
+              sf.write(
+                  audio_path,
+                  audio,
+                  SAMPLE_RATE
+              )
+
+              final_audio_duration = (
+                  len(audio) / SAMPLE_RATE
               )
 
               print(
-                  "Narration below 30 sec."
+                  f"Narration shorter than 30s. "
+                  f"Added {padding_seconds:.2f}s silence."
               )
 
-              print(
-                  "Tempo factor:",
-                  factor
+          elif original_duration <= 60:
+
+              sf.write(
+                  audio_path,
+                  audio,
+                  SAMPLE_RATE
               )
 
-              run(
-                  [
-                      "ffmpeg",
-                      "-y",
-                      "-i", str(full_audio),
-                      "-filter:a",
-                      f"atempo={factor:.6f}",
-                      str(processed_audio)
-                  ]
+              final_audio_duration = (
+                  original_duration
               )
-
-              normalized_duration = probe_duration(
-                  processed_audio
-              )
-
-              if normalized_duration < 30.0:
-
-                  pad = (
-                      30.0 -
-                      normalized_duration
-                  )
-
-                  final_audio = (
-                      out /
-                      "voice_final.wav"
-                  )
-
-                  run(
-                      [
-                          "ffmpeg",
-                          "-y",
-                          "-i",
-                          str(processed_audio),
-                          "-af",
-                          f"apad=pad_dur={pad:.3f}",
-                          "-t", "30",
-                          str(final_audio)
-                      ]
-                  )
-
-              else:
-                  final_audio = processed_audio
-
-
-          elif original_duration > 60.0:
-
-              # Speed up narration so the complete narration
-              # remains within the Shorts limit.
-              factor = (
-                  original_duration /
-                  60.0
-              )
-
-              # atempo supports 0.5-2.0.
-              if factor > 2.0:
-
-                  # A very long script should not be destroyed
-                  # by extreme acceleration.
-                  raise SystemExit(
-                      "Script is longer than "
-                      "120 seconds. Generate a shorter "
-                      "short-form script."
-                  )
-
-              print(
-                  "Narration above 60 sec."
-              )
-
-              print(
-                  "Tempo factor:",
-                  factor
-              )
-
-              run(
-                  [
-                      "ffmpeg",
-                      "-y",
-                      "-i", str(full_audio),
-                      "-filter:a",
-                      f"atempo={factor:.6f}",
-                      str(processed_audio)
-                  ]
-              )
-
-              final_audio = processed_audio
-
 
           else:
 
-              final_audio = full_audio
+              # Only speed up narration when it is genuinely
+              # longer than the 60-second maximum.
 
-
-          final_duration = probe_duration(
-              final_audio
-          )
-
-          print(
-              "Final narration duration:",
-              f"{final_duration:.2f}s"
-          )
-
-
-          if (
-              final_duration < 30.0
-              or final_duration > 60.0
-          ):
-              raise SystemExit(
-                  "Final narration duration is "
-                  "outside the allowed 30-60 second range."
+              sf.write(
+                  OUT / "voice_original.wav",
+                  audio,
+                  SAMPLE_RATE
               )
 
-
-          # ============================================================
-          # DOWNLOAD VISUALS
-          #
-          # One section = one visual.
-          #
-          # Video first.
-          # Image second.
-          # ============================================================
-
-          section_clips = []
-
-          current_audio_time = 0.0
-
-          for i, item in enumerate(normalized):
-
-              if i >= len(section_durations):
-                  break
-
-              original_section_duration = (
-                  section_durations[i]
+              factor = (
+                  original_duration / 59.5
               )
 
-              if original_duration > 0:
-
-                  section_duration = (
-                      original_section_duration
-                      * final_duration
-                      / original_duration
-                  )
-
-              else:
-                  section_duration = (
-                      original_section_duration
-                  )
-
-              section_duration = max(
-                  0.5,
-                  section_duration
+              factor = max(
+                  1.01,
+                  min(factor, 2.0)
               )
 
-
-              video_url = item["video_url"]
-              image_url = item["image_url"]
-
-
-              source_video = (
-                  visual_dir /
-                  f"source_{i}.mp4"
+              filter_chain = (
+                  f"atempo={factor:.6f}"
               )
 
-              source_image = (
-                  visual_dir /
-                  f"source_{i}.jpg"
-              )
-
-              section_output = (
-                  visual_dir /
-                  f"section_{i}.mp4"
-              )
-
-
-              downloaded_video = False
-
-
-              # --------------------------------------------------------
-              # VIDEO
-              # --------------------------------------------------------
-
-              if video_url:
-
-                  print(
-                      f"\nDownloading video "
-                      f"for section {i + 1}"
-                  )
-
-                  try:
-
-                      run(
-                          [
-                              "curl",
-                              "-L",
-                              "--fail",
-                              "--silent",
-                              "--show-error",
-                              "--retry", "3",
-                              "--retry-delay", "2",
-                              "--connect-timeout", "20",
-                              "--max-time", "120",
-                              "-A",
-                              "Mozilla/5.0",
-                              "-o",
-                              str(source_video),
-                              video_url
-                          ]
-                      )
-
-                      if (
-                          source_video.exists()
-                          and
-                          source_video.stat().st_size
-                          > 10000
-                      ):
-
-                          downloaded_video = True
-
-                          print(
-                              "Video downloaded."
-                          )
-
-                  except Exception as e:
-
-                      print(
-                          "Video download failed:",
-                          e
-                      )
-
-
-              # --------------------------------------------------------
-              # IMAGE FALLBACK
-              # --------------------------------------------------------
-
-              if (
-                  not downloaded_video
-                  and image_url
-              ):
-
-                  print(
-                      f"Trying image fallback "
-                      f"for section {i + 1}"
-                  )
-
-                  try:
-
-                      run(
-                          [
-                              "curl",
-                              "-L",
-                              "--fail",
-                              "--silent",
-                              "--show-error",
-                              "--retry", "3",
-                              "--retry-delay", "2",
-                              "--connect-timeout", "20",
-                              "--max-time", "60",
-                              "-A",
-                              "Mozilla/5.0",
-                              "-o",
-                              str(source_image),
-                              image_url
-                          ]
-                      )
-
-                      if (
-                          source_image.exists()
-                          and
-                          source_image.stat().st_size
-                          > 1000
-                      ):
-
-                          run(
-                              [
-                                  "ffmpeg",
-                                  "-y",
-                                  "-loop", "1",
-                                  "-i",
-                                  str(source_image),
-                                  "-t",
-                                  f"{section_duration:.3f}",
-                                  "-vf",
-                                  (
-                                      "scale=1080:1920:"
-                                      "force_original_aspect_ratio=increase,"
-                                      "crop=1080:1920,"
-                                      "format=yuv420p"
-                                  ),
-                                  "-r", "30",
-                                  "-an",
-                                  "-c:v", "libx264",
-                                  "-preset", "veryfast",
-                                  "-crf", "24",
-                                  "-pix_fmt", "yuv420p",
-                                  str(section_output)
-                              ]
-                          )
-
-                          section_clips.append(
-                              section_output
-                          )
-
-                          print(
-                              "Image fallback converted "
-                              "to video."
-                          )
-
-                          continue
-
-                  except Exception as e:
-
-                      print(
-                          "Image fallback failed:",
-                          e
-                      )
-
-
-              # --------------------------------------------------------
-              # NO ASSET
-              # --------------------------------------------------------
-
-              if not downloaded_video:
-
-                  raise SystemExit(
-                      f"No usable visual for section "
-                      f"{i + 1}. "
-                      f"Pexels must provide video_url "
-                      f"or image_url."
-                  )
-
-
-              # --------------------------------------------------------
-              # CREATE VIDEO SECTION
-              # --------------------------------------------------------
-
-              run(
+              subprocess.run(
                   [
                       "ffmpeg",
                       "-y",
-                      "-stream_loop", "-1",
-                      "-i", str(source_video),
-                      "-t",
-                      f"{section_duration:.3f}",
-                      "-vf",
-                      (
-                          "scale=1080:1920:"
-                          "force_original_aspect_ratio=increase,"
-                          "crop=1080:1920,"
-                          "format=yuv420p"
+                      "-i",
+                      str(
+                          OUT / "voice_original.wav"
                       ),
-                      "-r", "30",
+                      "-af",
+                      filter_chain,
+                      "-ar",
+                      str(SAMPLE_RATE),
+                      "-ac",
+                      "1",
+                      "-c:a",
+                      "pcm_s16le",
+                      str(audio_path)
+                  ],
+                  check=True
+              )
+
+              final_audio_duration = float(
+                  subprocess.check_output(
+                      [
+                          "ffprobe",
+                          "-v",
+                          "error",
+                          "-show_entries",
+                          "format=duration",
+                          "-of",
+                          "default=noprint_wrappers=1:nokey=1",
+                          str(audio_path)
+                      ],
+                      text=True
+                  ).strip()
+              )
+
+              print(
+                  f"Narration normalized to "
+                  f"{final_audio_duration:.2f}s"
+              )
+
+          # ------------------------------------------------------------
+          # SECTION TIMING
+          # ------------------------------------------------------------
+
+          sentences = [
+              s.strip()
+              for s in re.split(
+                  r"(?<=[.!?])\s+",
+                  SCRIPT
+              )
+              if s.strip()
+          ]
+
+          if not sentences:
+              sentences = [SCRIPT]
+
+          weights = []
+
+          for sentence in sentences:
+              count = len(
+                  re.findall(
+                      r"\b[\w'-]+\b",
+                      sentence
+                  )
+              )
+
+              weights.append(
+                  max(1, count)
+              )
+
+          total_weight = sum(weights)
+
+          section_durations = [
+              final_audio_duration
+              * weight
+              / total_weight
+              for weight in weights
+          ]
+
+          # Map sections across the available visuals.
+          visual_count = len(downloaded)
+
+          assignments = []
+
+          for i, duration in enumerate(
+              section_durations
+          ):
+
+              visual_index = min(
+                  i,
+                  visual_count - 1
+              )
+
+              assignments.append(
+                  (
+                      downloaded[visual_index],
+                      duration
+                  )
+              )
+
+          # ------------------------------------------------------------
+          # VISUAL SEGMENTS
+          # ------------------------------------------------------------
+
+          segments = []
+
+          for i, (item, duration) in enumerate(
+              assignments
+          ):
+
+              source = item["path"]
+
+              segment = (
+                  OUT / f"segment_{i:02d}.mp4"
+              )
+
+              video_filter = (
+                  "scale=1080:1920:"
+                  "force_original_aspect_ratio=increase,"
+                  "crop=1080:1920,"
+                  "setsar=1"
+              )
+
+              if item["kind"] == "video":
+
+                  command = [
+                      "ffmpeg",
+                      "-y",
+                      "-stream_loop",
+                      "-1",
+                      "-i",
+                      str(source),
+                      "-t",
+                      f"{duration:.3f}",
+                      "-vf",
+                      video_filter,
                       "-an",
-                      "-c:v", "libx264",
-                      "-preset", "veryfast",
-                      "-crf", "23",
-                      "-pix_fmt", "yuv420p",
-                      str(section_output)
+                      "-r",
+                      "30",
+                      "-c:v",
+                      "libx264",
+                      "-preset",
+                      "veryfast",
+                      "-crf",
+                      "24",
+                      "-pix_fmt",
+                      "yuv420p",
+                      str(segment)
                   ]
+
+              else:
+
+                  command = [
+                      "ffmpeg",
+                      "-y",
+                      "-loop",
+                      "1",
+                      "-i",
+                      str(source),
+                      "-t",
+                      f"{duration:.3f}",
+                      "-vf",
+                      video_filter,
+                      "-an",
+                      "-r",
+                      "30",
+                      "-c:v",
+                      "libx264",
+                      "-preset",
+                      "veryfast",
+                      "-crf",
+                      "24",
+                      "-pix_fmt",
+                      "yuv420p",
+                      str(segment)
+                  ]
+
+              print(
+                  "Creating visual segment:",
+                  i
               )
 
-              section_clips.append(
-                  section_output
+              subprocess.run(
+                  command,
+                  check=True
               )
 
+              segments.append(segment)
 
-          if not section_clips:
+          if not segments:
               raise SystemExit(
-                  "No section videos were created."
+                  "ERROR: No visual segments created"
               )
 
-
-          # ============================================================
-          # CONCAT VISUAL SECTIONS
-          # ============================================================
-
-          visual_list = (
-              out / "visual_list.txt"
+          concat_file = (
+              OUT / "segments.txt"
           )
 
-          with visual_list.open(
+          with concat_file.open(
               "w",
               encoding="utf-8"
           ) as f:
 
-              for path in section_clips:
-
-                  safe = (
-                      str(path.resolve())
-                      .replace("'", "'\\''")
-                  )
+              for segment in segments:
 
                   f.write(
-                      f"file '{safe}'\n"
+                      f"file '{segment.resolve()}'\n"
                   )
 
-
           visuals_video = (
-              out / "visuals.mp4"
+              OUT / "visuals.mp4"
           )
 
-          run(
+          subprocess.run(
               [
                   "ffmpeg",
                   "-y",
-                  "-f", "concat",
-                  "-safe", "0",
-                  "-i", str(visual_list),
-                  "-c:v", "libx264",
-                  "-preset", "veryfast",
-                  "-crf", "23",
-                  "-pix_fmt", "yuv420p",
+                  "-f",
+                  "concat",
+                  "-safe",
+                  "0",
+                  "-i",
+                  str(concat_file),
+                  "-an",
+                  "-c",
+                  "copy",
                   str(visuals_video)
-              ]
+              ],
+              check=True
           )
 
-
-          # ============================================================
+          # ------------------------------------------------------------
           # SUBTITLES
           #
-          # Bottom safe area.
-          # No giant center-screen text.
-          # 4 words maximum per caption.
-          # ============================================================
+          # Bottom safe zone.
+          # Small chunks.
+          # Never center screen.
+          # ------------------------------------------------------------
 
-          subtitle_path = (
-              out / "captions.srt"
-          )
+          def timestamp(seconds):
 
-          subtitle_entries = []
-
-          current_time = 0.0
-
-
-          for i, text in enumerate(section_texts):
-
-              text = clean_text(text)
-
-              if not text:
-                  continue
-
-              if i >= len(section_durations):
-                  break
-
-              original_section = (
-                  section_durations[i]
+              total_ms = int(
+                  round(seconds * 1000)
               )
 
-              if original_duration > 0:
-
-                  section_final = (
-                      original_section
-                      * final_duration
-                      / original_duration
-                  )
-
-              else:
-
-                  section_final = (
-                      original_section
-                  )
-
-
-              captions = caption_lines(
-                  text,
-                  max_words=4
+              hours, remainder = divmod(
+                  total_ms,
+                  3600000
               )
 
-              if not captions:
-                  continue
-
-
-              step = (
-                  section_final /
-                  len(captions)
+              minutes, remainder = divmod(
+                  remainder,
+                  60000
               )
 
+              seconds_int, milliseconds = divmod(
+                  remainder,
+                  1000
+              )
 
-              for j, caption in enumerate(
-                  captions
-              ):
+              return (
+                  f"{hours:02d}:"
+                  f"{minutes:02d}:"
+                  f"{seconds_int:02d},"
+                  f"{milliseconds:03d}"
+              )
 
-                  start = (
-                      current_time
-                      + j * step
-                  )
+          def caption_chunks(text):
 
-                  end = (
-                      current_time
-                      + (j + 1) * step
-                  )
+              words = text.split()
 
-                  subtitle_entries.append(
-                      (
-                          start,
-                          min(
-                              end,
-                              final_duration
-                          ),
-                          caption
+              chunks = []
+
+              current = []
+
+              for word in words:
+
+                  candidate = (
+                      " ".join(
+                          current + [word]
                       )
                   )
 
+                  if current and (
+                      len(current) >= 5
+                      or len(candidate) > 34
+                  ):
 
-              current_time += section_final
+                      chunks.append(
+                          " ".join(current)
+                      )
 
+                      current = [word]
 
-          with subtitle_path.open(
+                  else:
+
+                      current.append(word)
+
+              if current:
+                  chunks.append(
+                      " ".join(current)
+                  )
+
+              return chunks
+
+          caption_units = []
+
+          for sentence in sentences:
+
+              parts = caption_chunks(
+                  sentence
+              )
+
+              if not parts:
+                  parts = [sentence]
+
+              for part in parts:
+                  count = len(
+                      re.findall(
+                          r"\b[\w'-]+\b",
+                          part
+                      )
+                  )
+
+                  caption_units.append(
+                      (
+                          part,
+                          max(1, count)
+                      )
+                  )
+
+          caption_weight = sum(
+              weight
+              for _, weight
+              in caption_units
+          )
+
+          srt_path = (
+              OUT / "captions.srt"
+          )
+
+          current_time = 0.0
+
+          with srt_path.open(
               "w",
               encoding="utf-8"
           ) as f:
 
               for index, (
-                  start,
-                  end,
-                  caption
+                  caption,
+                  weight
               ) in enumerate(
-                  subtitle_entries,
+                  caption_units,
                   1
               ):
 
+                  duration = (
+                      final_audio_duration
+                      * weight
+                      / caption_weight
+                  )
+
+                  start = current_time
+
+                  end = min(
+                      final_audio_duration,
+                      current_time + duration
+                  )
+
                   f.write(
                       f"{index}\n"
-                  )
-
-                  f.write(
                       f"{timestamp(start)} --> "
                       f"{timestamp(end)}\n"
-                  )
-
-                  f.write(
                       f"{caption}\n\n"
                   )
 
+                  current_time = end
 
-          # ============================================================
+          # ------------------------------------------------------------
           # FINAL VIDEO
-          # ============================================================
+          # ------------------------------------------------------------
 
-          final = (
-              out / "short.mp4"
+          final = pathlib.Path(
+              "final-short.mp4"
           )
-
 
           subtitle_filter = (
-              f"subtitles={subtitle_path}:"
+              f"subtitles={srt_path}:"
               "force_style="
-              "'FontName=Arial,"
-              "FontSize=16,"
+              "'FontName=DejaVu Sans,"
+              "FontSize=20,"
               "Bold=1,"
-              "Outline=2,"
+              "PrimaryColour=&H00FFFFFF,"
+              "OutlineColour=&H00000000,"
+              "BorderStyle=1,"
+              "Outline=3,"
               "Shadow=0,"
               "Alignment=2,"
-              "MarginV=150,"
-              "BorderStyle=1,"
-              "Spacing=0'"
+              "MarginV=220'"
           )
 
-
-          run(
+          subprocess.run(
               [
                   "ffmpeg",
                   "-y",
-                  "-i", str(visuals_video),
-                  "-i", str(final_audio),
-
+                  "-i",
+                  str(visuals_video),
+                  "-i",
+                  str(audio_path),
                   "-vf",
                   subtitle_filter,
-
-                  "-map", "0:v:0",
-                  "-map", "1:a:0",
-
                   "-t",
-                  f"{final_duration:.3f}",
-
-                  "-c:v", "libx264",
-                  "-preset", "veryfast",
-                  "-crf", "22",
-
-                  "-c:a", "aac",
-                  "-b:a", "128k",
-
-                  "-pix_fmt", "yuv420p",
-
-                  "-movflags", "+faststart",
-
-                  "-shortest",
-
+                  f"{final_audio_duration:.3f}",
+                  "-map",
+                  "0:v:0",
+                  "-map",
+                  "1:a:0",
+                  "-r",
+                  "30",
+                  "-c:v",
+                  "libx264",
+                  "-preset",
+                  "veryfast",
+                  "-crf",
+                  "23",
+                  "-pix_fmt",
+                  "yuv420p",
+                  "-c:a",
+                  "aac",
+                  "-b:a",
+                  "128k",
+                  "-movflags",
+                  "+faststart",
                   str(final)
-              ]
+              ],
+              check=True
           )
 
-
-          # ============================================================
+          # ------------------------------------------------------------
           # FINAL VALIDATION
-          # ============================================================
+          # ------------------------------------------------------------
 
-          if not final.exists():
+          duration = float(
+              subprocess.check_output(
+                  [
+                      "ffprobe",
+                      "-v",
+                      "error",
+                      "-show_entries",
+                      "format=duration",
+                      "-of",
+                      "default=noprint_wrappers=1:nokey=1",
+                      str(final)
+                  ],
+                  text=True
+              ).strip()
+          )
+
+          size = final.stat().st_size
+
+          print(
+              f"Final duration: {duration:.2f}s"
+          )
+
+          print(
+              f"Final size: {size} bytes"
+          )
+
+          if size <= 0:
               raise SystemExit(
-                  "Final video was not created."
+                  "ERROR: final-short.mp4 is empty"
               )
 
-          if final.stat().st_size < 10000:
+          if duration < 29.5:
               raise SystemExit(
-                  "Final video file is unexpectedly small."
+                  f"ERROR: final video too short: "
+                  f"{duration:.2f}s"
               )
 
-
-          actual_duration = probe_duration(
-              final
-          )
-
-          print(
-              "\n========================================"
-          )
-
-          print(
-              "FINAL VIDEO CREATED"
-          )
-
-          print(
-              "Path:",
-              final
-          )
-
-          print(
-              "Duration:",
-              f"{actual_duration:.2f}s"
-          )
-
-          print(
-              "Size:",
-              final.stat().st_size,
-              "bytes"
-          )
-
-          print(
-              "========================================"
-          )
-
-
-          if (
-              actual_duration < 30.0
-              or actual_duration > 60.0
-          ):
-
+          if duration > 60.5:
               raise SystemExit(
-                  f"Final video is "
-                  f"{actual_duration:.2f}s. "
-                  f"Allowed range is 30-60s."
+                  f"ERROR: final video too long: "
+                  f"{duration:.2f}s"
               )
 
-
           print(
-              f"Video duration valid: "
-              f"{actual_duration:.2f}s"
+              "VIDEO READY:",
+              final.resolve()
           )
 
           PY
 
+          python3 render.py
 
-      - name: Upload MP4 to Google Drive and log Sheet
+      - name: Upload MP4 to Google Drive and append Sheet row
+        if: success()
+        continue-on-error: true
+
         env:
           GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           GOOGLE_SHEET_RANGE: ${{ secrets.GOOGLE_SHEET_RANGE }}
-
           RUN_ID: ${{ inputs.run_id }}
           TOPIC: ${{ inputs.topic }}
           TITLE: ${{ inputs.title }}
 
         run: |
-          set -e
-
           python3 - <<'PY'
-          import os
-          import json
           import datetime
-
-          from google.oauth2 import service_account
-          from googleapiclient.discovery import build
-          from googleapiclient.http import MediaFileUpload
-
-
-          # ============================================================
-          # VALIDATE REQUIRED SECRETS
-          # ============================================================
+          import json
+          import os
+          import sys
 
           required = [
               "GDRIVE_SERVICE_ACCOUNT_JSON",
@@ -1321,19 +912,28 @@ jobs:
               "GOOGLE_SHEET_ID"
           ]
 
-          for name in required:
+          missing = [
+              name
+              for name in required
+              if not os.environ.get(name)
+          ]
 
-              value = os.environ.get(name, "").strip()
+          if missing:
 
-              if not value:
-                  raise SystemExit(
-                      f"Missing required GitHub secret: {name}"
-                  )
+              print(
+                  "WARNING: Missing Google secrets:",
+                  ", ".join(missing)
+              )
 
+              print(
+                  "Skipping Drive/Sheets upload."
+              )
 
-          # ============================================================
-          # GOOGLE AUTH
-          # ============================================================
+              sys.exit(0)
+
+          from google.oauth2 import service_account
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
 
           credentials = (
               service_account
@@ -1351,127 +951,115 @@ jobs:
               )
           )
 
-
           drive = build(
               "drive",
               "v3",
-              credentials=credentials
+              credentials=credentials,
+              cache_discovery=False
           )
 
           sheets = build(
               "sheets",
               "v4",
-              credentials=credentials
+              credentials=credentials,
+              cache_discovery=False
           )
 
-
-          # ============================================================
-          # UPLOAD VIDEO
-          # ============================================================
+          run_id = os.environ["RUN_ID"]
+          topic = os.environ["TOPIC"]
+          title = os.environ["TITLE"]
 
           metadata = {
-              "name":
-                  f"{os.environ['RUN_ID']}.mp4",
-
-              "parents":
-                  [
-                      os.environ[
-                          "GDRIVE_FOLDER_ID"
-                      ]
-                  ]
+              "name": f"{run_id}.mp4",
+              "parents": [
+                  os.environ["GDRIVE_FOLDER_ID"]
+              ],
+              "mimeType": "video/mp4"
           }
 
-
           media = MediaFileUpload(
-              "out/short.mp4",
+              "final-short.mp4",
               mimetype="video/mp4",
-              resumable=True
+              resumable=True,
+              chunksize=8 * 1024 * 1024
           )
 
-
           uploaded = (
-              drive
-              .files()
+              drive.files()
               .create(
                   body=metadata,
                   media_body=media,
-                  fields="id,webViewLink,webContentLink"
+                  fields="id,name,webViewLink"
               )
               .execute()
           )
 
+          file_id = uploaded["id"]
 
-          video_url = (
+          link = (
               uploaded.get("webViewLink")
-              or uploaded.get("webContentLink")
-              or ""
+              or
+              f"https://drive.google.com/file/d/{file_id}/view"
           )
 
+          try:
 
-          if not video_url:
+              drive.permissions().create(
+                  fileId=file_id,
+                  body={
+                      "type": "anyone",
+                      "role": "reader"
+                  },
+                  fields="id"
+              ).execute()
 
-              raise SystemExit(
-                  "Google Drive upload succeeded "
-                  "but no video URL was returned."
+              link = (
+                  f"https://drive.google.com/file/d/"
+                  f"{file_id}/view"
               )
 
+          except Exception as exc:
 
-          print(
-              "VIDEO URL:"
-          )
-
-          print(
-              video_url
-          )
-
-
-          # ============================================================
-          # SHEET LOG
-          # ============================================================
-
-          row = [
-              [
-                  datetime.datetime.now(
-                      datetime.timezone.utc
-                  ).isoformat(),
-
-                  os.environ["RUN_ID"],
-
-                  os.environ["TITLE"],
-
-                  os.environ["TOPIC"],
-
-                  "DONE",
-
-                  video_url
-              ]
-          ]
-
+              print(
+                  "WARNING: Could not enable public "
+                  "Drive sharing:",
+                  exc
+              )
 
           sheet_range = (
               os.environ.get(
-                  "GOOGLE_SHEET_RANGE",
-                  ""
-              ).strip()
-              or "Sheet1!A:F"
+                  "GOOGLE_SHEET_RANGE"
+              )
+              or
+              "Sheet1!A:F"
           )
 
+          row = [[
+              datetime.datetime.now(
+                  datetime.timezone.utc
+              ).isoformat(),
+
+              run_id,
+
+              title,
+
+              topic,
+
+              "DONE",
+
+              link
+          ]]
 
           (
-              sheets
-              .spreadsheets()
+              sheets.spreadsheets()
               .values()
               .append(
                   spreadsheetId=os.environ[
                       "GOOGLE_SHEET_ID"
                   ],
-
                   range=sheet_range,
-
                   valueInputOption="USER_ENTERED",
-
                   insertDataOption="INSERT_ROWS",
-
                   body={
                       "values": row
                   }
@@ -1479,22 +1067,26 @@ jobs:
               .execute()
           )
 
-
           print(
-              "Google Sheet row added successfully."
+              "VIDEO_URL:",
+              link
           )
 
           PY
 
-
       - name: Upload GitHub artifact backup
+        if: always()
+
         uses: actions/upload-artifact@v4
 
         with:
-          name: short-${{ inputs.run_id }}
+          name: final-short-${{ github.run_id }}
 
-          path: out/short.mp4
+          path: |
+            final-short.mp4
+            out/voice.wav
+            out/captions.srt
 
-          if-no-files-found: error
+          if-no-files-found: warn
 
           retention-days: 7
