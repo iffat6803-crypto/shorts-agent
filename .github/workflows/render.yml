@@ -4,18 +4,27 @@ on:
   workflow_dispatch:
     inputs:
       run_id:
+        description: "Unique run ID"
         required: true
         type: string
+
       topic:
+        description: "Video topic"
         required: true
         type: string
+
       script:
+        description: "Complete narration script"
         required: true
         type: string
+
       title:
+        description: "Video title"
         required: true
         type: string
+
       visuals:
+        description: "JSON array of visual video URLs"
         required: true
         type: string
 
@@ -23,10 +32,12 @@ jobs:
   render:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+
     permissions:
       contents: read
 
     steps:
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -34,126 +45,689 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg espeak-ng python3-pip
-          python3 -m pip install --upgrade pip
-          python3 -m pip install "kokoro>=0.9.4" soundfile torch google-api-python-client google-auth google-auth-httplib2 google-auth-oauthlib
 
-      - name: Render video
+      - name: Install Python packages
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install \
+            "kokoro>=0.9.4" \
+            soundfile \
+            torch \
+            google-api-python-client \
+            google-auth \
+            google-auth-httplib2 \
+            google-auth-oauthlib
+
+      - name: Render Short
         env:
           RUN_ID: ${{ inputs.run_id }}
           TOPIC: ${{ inputs.topic }}
           SCRIPT: ${{ inputs.script }}
           TITLE: ${{ inputs.title }}
           VISUALS_JSON: ${{ inputs.visuals }}
+
         run: |
+          set -e
+
+          mkdir -p out
+
           python3 - <<'PY'
-          import os, json, subprocess, urllib.request, pathlib, re, textwrap
+          import os
+          import json
+          import re
+          import pathlib
+          import subprocess
+          import urllib.request
+          import urllib.error
+
           from kokoro import KPipeline
           import soundfile as sf
 
-          out = pathlib.Path("out")
-          out.mkdir(exist_ok=True)
-          script = os.environ["SCRIPT"]
-          visuals = json.loads(os.environ["VISUALS_JSON"])
+          OUT = pathlib.Path("out")
+          OUT.mkdir(exist_ok=True)
 
-          # Download up to 8 portrait clips; failed downloads are skipped.
-          media=[]
-          for i,v in enumerate(visuals[:8]):
+          script = os.environ["SCRIPT"].strip()
+          visuals_raw = os.environ["VISUALS_JSON"].strip()
+
+          if not script:
+              raise SystemExit("ERROR: Script is empty.")
+
+          try:
+              visuals = json.loads(visuals_raw)
+          except Exception as e:
+              raise SystemExit(f"ERROR: Invalid visuals JSON: {e}")
+
+          if not isinstance(visuals, list):
+              raise SystemExit("ERROR: visuals must be a JSON array.")
+
+          if not visuals:
+              raise SystemExit("ERROR: No visual URLs were supplied.")
+
+          print("Topic:", os.environ["TOPIC"])
+          print("Title:", os.environ["TITLE"])
+          print("Visual assets supplied:", len(visuals))
+
+          # ------------------------------------------------------------
+          # 1. DOWNLOAD VISUALS
+          # ------------------------------------------------------------
+
+          media = []
+
+          for i, item in enumerate(visuals[:10]):
+
+              if not isinstance(item, dict):
+                  print("Skipping invalid visual:", i)
+                  continue
+
+              url = item.get("url")
+
+              if not url:
+                  print("Skipping visual without URL:", i)
+                  continue
+
+              target = OUT / f"clip_{i}.mp4"
+
               try:
-                  p=out/f"clip_{i}.mp4"
-                  urllib.request.urlretrieve(v["url"], p)
-                  media.append(p)
+                  print("Downloading visual:", i)
+
+                  request = urllib.request.Request(
+                      url,
+                      headers={
+                          "User-Agent": "Mozilla/5.0"
+                      }
+                  )
+
+                  with urllib.request.urlopen(
+                      request,
+                      timeout=60
+                  ) as response:
+
+                      with open(target, "wb") as f:
+                          f.write(response.read())
+
+                  if target.stat().st_size < 10000:
+                      print("Downloaded file is too small, skipping:", i)
+                      target.unlink(missing_ok=True)
+                      continue
+
+                  media.append(target)
+
+                  print(
+                      "Downloaded:",
+                      target,
+                      target.stat().st_size,
+                      "bytes"
+                  )
+
               except Exception as e:
-                  print("visual download failed", i, e)
+                  print(
+                      "Visual download failed:",
+                      i,
+                      repr(e)
+                  )
 
           if not media:
-              raise SystemExit("No visual assets downloaded")
+              raise SystemExit(
+                  "ERROR: No usable visual assets were downloaded."
+              )
 
-          # Kokoro local/cloud-runner TTS: no paid TTS API.
-          pipe=KPipeline(lang_code="a")
-          chunks=[]
-          for i,(gs,ps,audio) in enumerate(pipe(script, voice="af_heart")):
-              p=out/f"voice_{i}.wav"
-              sf.write(p, audio, 24000)
-              chunks.append(p)
+          print("Usable visual clips:", len(media))
 
-          with open(out/"voice_list.txt","w") as f:
-              for p in chunks:
-                  f.write(f"file '{p.resolve()}'\n")
+          # ------------------------------------------------------------
+          # 2. GENERATE KOKORO VOICE
+          # ------------------------------------------------------------
 
-          subprocess.run(["ffmpeg","-y","-f","concat","-safe","0","-i",str(out/"voice_list.txt"),
-                          "-c","copy",str(out/"voice.wav")],check=True)
+          print("Generating voice...")
 
-          # Build a 45-60s portrait montage. Clips are looped/truncated by ffmpeg.
-          with open(out/"media_list.txt","w") as f:
-              for p in media:
-                  f.write(f"file '{p.resolve()}'\n")
+          pipeline = KPipeline(lang_code="a")
 
-          subprocess.run(["ffmpeg","-y","-stream_loop","-1","-f","concat","-safe","0",
-                          "-i",str(out/"media_list.txt"),"-t","60",
-                          "-vf","scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
-                          "-an","-c:v","libx264","-pix_fmt","yuv420p",str(out/"visuals.mp4")],check=True)
+          audio_files = []
 
-          # Basic subtitle timing based on script words.
-          words=re.findall(r"\S+",script)
-          n=len(words)
-          lines=[]
-          for i in range(0,n,5):
-              lines.append(" ".join(words[i:i+5]))
-          duration=60.0
-          step=duration/max(1,len(lines))
-          srt=[]
-          for i,line in enumerate(lines):
-              a=i*step; b=min(duration,(i+1)*step)
-              def ts(x):
-                  h=int(x//3600); m=int((x%3600)//60); sec=int(x%60); ms=int((x-int(x))*1000)
-                  return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
-              srt += [str(i+1),f"{ts(a)} --> {ts(b)}",line,""]
-          (out/"captions.srt").write_text("\n".join(srt),encoding="utf-8")
+          for i, (_, _, audio) in enumerate(
+              pipeline(
+                  script,
+                  voice="af_heart",
+                  speed=1.0
+              )
+          ):
 
-          final=out/"short.mp4"
-          subprocess.run(["ffmpeg","-y","-i",str(out/"visuals.mp4"),"-i",str(out/"voice.wav"),
-                          "-vf",f"subtitles={out/'captions.srt'}:force_style='FontName=Arial,FontSize=18,Bold=1,Outline=3,Shadow=1,MarginV=220'",
-                          "-map","0:v:0","-map","1:a:0","-t","60",
-                          "-c:v","libx264","-preset","veryfast","-crf","22","-c:a","aac","-b:a","128k",
-                          "-shortest",str(final)],check=True)
-          print("VIDEO:", final)
+              audio_path = OUT / f"voice_{i}.wav"
+
+              sf.write(
+                  audio_path,
+                  audio,
+                  24000
+              )
+
+              audio_files.append(audio_path)
+
+          if not audio_files:
+              raise SystemExit(
+                  "ERROR: Kokoro generated no audio."
+              )
+
+          # ------------------------------------------------------------
+          # 3. CONCATENATE AUDIO
+          # ------------------------------------------------------------
+
+          voice_list = OUT / "voice_list.txt"
+
+          with open(voice_list, "w", encoding="utf-8") as f:
+
+              for audio_file in audio_files:
+                  safe_path = str(audio_file.resolve()).replace("'", "'\\''")
+                  f.write(f"file '{safe_path}'\n")
+
+          subprocess.run(
+              [
+                  "ffmpeg",
+                  "-y",
+                  "-f",
+                  "concat",
+                  "-safe",
+                  "0",
+                  "-i",
+                  str(voice_list),
+                  "-c:a",
+                  "pcm_s16le",
+                  str(OUT / "voice.wav")
+              ],
+              check=True
+          )
+
+          # ------------------------------------------------------------
+          # 4. GET ACTUAL AUDIO DURATION
+          # ------------------------------------------------------------
+
+          duration_result = subprocess.run(
+              [
+                  "ffprobe",
+                  "-v",
+                  "error",
+                  "-show_entries",
+                  "format=duration",
+                  "-of",
+                  "default=noprint_wrappers=1:nokey=1",
+                  str(OUT / "voice.wav")
+              ],
+              capture_output=True,
+              text=True,
+              check=True
+          )
+
+          duration = float(duration_result.stdout.strip())
+
+          print(f"Voice duration: {duration:.2f} seconds")
+
+          # Hard safety limits.
+          if duration < 30:
+              raise SystemExit(
+                  f"ERROR: Generated narration is only "
+                  f"{duration:.2f}s. Minimum is 30s."
+              )
+
+          if duration > 60:
+              raise SystemExit(
+                  f"ERROR: Generated narration is "
+                  f"{duration:.2f}s. Maximum is 60s."
+              )
+
+          # ------------------------------------------------------------
+          # 5. CREATE VISUAL MONTAGE
+          # ------------------------------------------------------------
+
+          print("Creating visual montage...")
+
+          visual_list = OUT / "media_list.txt"
+
+          with open(
+              visual_list,
+              "w",
+              encoding="utf-8"
+          ) as f:
+
+              for media_file in media:
+                  safe_path = str(
+                      media_file.resolve()
+                  ).replace("'", "'\\''")
+
+                  f.write(
+                      f"file '{safe_path}'\n"
+                  )
+
+          visual_video = OUT / "visuals.mp4"
+
+          subprocess.run(
+              [
+                  "ffmpeg",
+                  "-y",
+                  "-stream_loop",
+                  "-1",
+                  "-f",
+                  "concat",
+                  "-safe",
+                  "0",
+                  "-i",
+                  str(visual_list),
+                  "-t",
+                  str(duration),
+                  "-vf",
+                  "scale=1080:1920:force_original_aspect_ratio=increase,"
+                  "crop=1080:1920,"
+                  "setsar=1",
+                  "-an",
+                  "-c:v",
+                  "libx264",
+                  "-preset",
+                  "veryfast",
+                  "-crf",
+                  "23",
+                  "-pix_fmt",
+                  "yuv420p",
+                  str(visual_video)
+              ],
+              check=True
+          )
+
+          # ------------------------------------------------------------
+          # 6. CREATE SENTENCE-BASED SUBTITLES
+          # ------------------------------------------------------------
+
+          print("Creating subtitles...")
+
+          sentences = [
+              x.strip()
+              for x in re.split(
+                  r'(?<=[.!?])\s+',
+                  script
+              )
+              if x.strip()
+          ]
+
+          if not sentences:
+              sentences = [script]
+
+          # Calculate timing using approximate word weights.
+          weights = [
+              max(1, len(sentence.split()))
+              for sentence in sentences
+          ]
+
+          total_weight = sum(weights)
+
+          def timestamp(seconds):
+              total_ms = int(seconds * 1000)
+
+              hours = total_ms // 3600000
+              total_ms %= 3600000
+
+              minutes = total_ms // 60000
+              total_ms %= 60000
+
+              seconds_int = total_ms // 1000
+              milliseconds = total_ms % 1000
+
+              return (
+                  f"{hours:02d}:"
+                  f"{minutes:02d}:"
+                  f"{seconds_int:02d},"
+                  f"{milliseconds:03d}"
+              )
+
+          srt_path = OUT / "captions.srt"
+
+          current = 0.0
+
+          with open(
+              srt_path,
+              "w",
+              encoding="utf-8"
+          ) as f:
+
+              for index, (
+                  sentence,
+                  weight
+              ) in enumerate(
+                  zip(sentences, weights),
+                  start=1
+              ):
+
+                  segment_duration = (
+                      duration *
+                      weight /
+                      total_weight
+                  )
+
+                  start = current
+                  end = min(
+                      duration,
+                      current + segment_duration
+                  )
+
+                  # Break very long captions into readable lines.
+                  words = sentence.split()
+
+                  caption_lines = []
+                  current_line = []
+
+                  for word in words:
+
+                      test_line = (
+                          " ".join(
+                              current_line + [word]
+                          )
+                      )
+
+                      if len(test_line) <= 38:
+                          current_line.append(word)
+
+                      else:
+                          if current_line:
+                              caption_lines.append(
+                                  " ".join(current_line)
+                              )
+
+                          current_line = [word]
+
+                  if current_line:
+                      caption_lines.append(
+                          " ".join(current_line)
+                      )
+
+                  caption_text = "\n".join(
+                      caption_lines[:3]
+                  )
+
+                  f.write(
+                      f"{index}\n"
+                      f"{timestamp(start)} --> "
+                      f"{timestamp(end)}\n"
+                      f"{caption_text}\n\n"
+                  )
+
+                  current = end
+
+          print("Subtitles created:", srt_path)
+
+          # ------------------------------------------------------------
+          # 7. FINAL VERTICAL VIDEO
+          # ------------------------------------------------------------
+
+          final = OUT / "short.mp4"
+
+          subtitle_filter = (
+              f"subtitles={srt_path}:"
+              "force_style="
+              "'FontName=Arial,"
+              "FontSize=15,"
+              "Bold=1,"
+              "PrimaryColour=&H00FFFFFF,"
+              "OutlineColour=&H00000000,"
+              "BorderStyle=1,"
+              "Outline=3,"
+              "Shadow=1,"
+              "Alignment=2,"
+              "MarginL=80,"
+              "MarginR=80,"
+              "MarginV=300'"
+          )
+
+          subprocess.run(
+              [
+                  "ffmpeg",
+                  "-y",
+
+                  "-i",
+                  str(visual_video),
+
+                  "-i",
+                  str(OUT / "voice.wav"),
+
+                  "-vf",
+                  subtitle_filter,
+
+                  "-map",
+                  "0:v:0",
+
+                  "-map",
+                  "1:a:0",
+
+                  "-t",
+                  str(duration),
+
+                  "-c:v",
+                  "libx264",
+
+                  "-preset",
+                  "veryfast",
+
+                  "-crf",
+                  "22",
+
+                  "-pix_fmt",
+                  "yuv420p",
+
+                  "-c:a",
+                  "aac",
+
+                  "-b:a",
+                  "128k",
+
+                  "-movflags",
+                  "+faststart",
+
+                  str(final)
+              ],
+              check=True
+          )
+
+          # ------------------------------------------------------------
+          # 8. FINAL VALIDATION
+          # ------------------------------------------------------------
+
+          check = subprocess.run(
+              [
+                  "ffprobe",
+                  "-v",
+                  "error",
+                  "-show_entries",
+                  "format=duration,size",
+                  "-of",
+                  "default=noprint_wrappers=1",
+                  str(final)
+              ],
+              capture_output=True,
+              text=True,
+              check=True
+          )
+
+          print("FINAL VIDEO:")
+          print(check.stdout)
+
+          if not final.exists():
+              raise SystemExit(
+                  "ERROR: Final MP4 was not created."
+              )
+
+          if final.stat().st_size < 100000:
+              raise SystemExit(
+                  "ERROR: Final MP4 is unexpectedly small."
+              )
+
+          print("VIDEO RENDER SUCCESS:", final)
+
           PY
 
-      - name: Upload MP4 to Google Drive and append Sheet row
+      - name: Upload MP4 to Google Drive and log Sheet
         env:
           GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           GOOGLE_SHEET_RANGE: ${{ secrets.GOOGLE_SHEET_RANGE }}
+
           RUN_ID: ${{ inputs.run_id }}
           TOPIC: ${{ inputs.topic }}
           TITLE: ${{ inputs.title }}
+
         run: |
+          set -e
+
           python3 - <<'PY'
-          import os, json, datetime
+          import os
+          import json
+          import datetime
+
           from google.oauth2 import service_account
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaFileUpload
 
-          creds = service_account.Credentials.from_service_account_info(
-              json.loads(os.environ["GDRIVE_SERVICE_ACCOUNT_JSON"]),
-              scopes=["https://www.googleapis.com/auth/drive","https://www.googleapis.com/auth/spreadsheets"]
+          service_account_json = os.environ.get(
+              "GDRIVE_SERVICE_ACCOUNT_JSON"
           )
-          drive=build("drive","v3",credentials=creds)
-          sheets=build("sheets","v4",credentials=creds)
 
-          meta={"name":f"{os.environ['RUN_ID']}.mp4",
-                "parents":[os.environ["GDRIVE_FOLDER_ID"]]}
-          media=MediaFileUpload("out/short.mp4",mimetype="video/mp4",resumable=True)
-          file=drive.files().create(body=meta,media_body=media,fields="id,webViewLink").execute()
+          if not service_account_json:
+              raise SystemExit(
+                  "ERROR: GDRIVE_SERVICE_ACCOUNT_JSON secret is missing."
+              )
 
-          row=[[datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                os.environ["RUN_ID"],os.environ["TITLE"],os.environ["TOPIC"],"DONE",file.get("webViewLink","")]]
-          sheets.spreadsheets().values().append(
-              spreadsheetId=os.environ["GOOGLE_SHEET_ID"],
-              range=os.environ["GOOGLE_SHEET_RANGE"] or "Sheet1!A:F",
-              valueInputOption="USER_ENTERED",
-              body={"values":row}
+          folder_id = os.environ.get(
+              "GDRIVE_FOLDER_ID"
+          )
+
+          sheet_id = os.environ.get(
+              "GOOGLE_SHEET_ID"
+          )
+
+          if not folder_id:
+              raise SystemExit(
+                  "ERROR: GDRIVE_FOLDER_ID secret is missing."
+              )
+
+          if not sheet_id:
+              raise SystemExit(
+                  "ERROR: GOOGLE_SHEET_ID secret is missing."
+              )
+
+          creds = service_account.Credentials.from_service_account_info(
+              json.loads(service_account_json),
+              scopes=[
+                  "https://www.googleapis.com/auth/drive",
+                  "https://www.googleapis.com/auth/spreadsheets"
+              ]
+          )
+
+          drive = build(
+              "drive",
+              "v3",
+              credentials=creds
+          )
+
+          sheets = build(
+              "sheets",
+              "v4",
+              credentials=creds
+          )
+
+          video_path = "out/short.mp4"
+
+          if not os.path.exists(video_path):
+              raise SystemExit(
+                  "ERROR: out/short.mp4 does not exist."
+              )
+
+          # ----------------------------------------------------------
+          # UPLOAD VIDEO TO GOOGLE DRIVE
+          # ----------------------------------------------------------
+
+          metadata = {
+              "name": f"{os.environ['RUN_ID']}.mp4",
+              "parents": [folder_id]
+          }
+
+          media = MediaFileUpload(
+              video_path,
+              mimetype="video/mp4",
+              resumable=True
+          )
+
+          uploaded = drive.files().create(
+              body=metadata,
+              media_body=media,
+              fields="id,name,webViewLink,webContentLink"
           ).execute()
-          print(file.get("webViewLink",""))
+
+          file_id = uploaded.get("id")
+
+          # Make the Drive file accessible by link.
+          try:
+              drive.permissions().create(
+                  fileId=file_id,
+                  body={
+                      "type": "anyone",
+                      "role": "reader"
+                  }
+              ).execute()
+          except Exception as e:
+              print(
+                  "Drive public-link permission warning:",
+                  repr(e)
+              )
+
+          # Get the final browser link.
+          file_info = drive.files().get(
+              fileId=file_id,
+              fields="id,name,webViewLink,webContentLink"
+          ).execute()
+
+          video_url = (
+              file_info.get("webViewLink")
+              or file_info.get("webContentLink")
+              or f"https://drive.google.com/file/d/{file_id}/view"
+          )
+
+          print("VIDEO URL:")
+          print(video_url)
+
+          # ----------------------------------------------------------
+          # APPEND GOOGLE SHEETS ROW
+          # ----------------------------------------------------------
+
+          now = datetime.datetime.now(
+              datetime.timezone.utc
+          ).isoformat()
+
+          row = [[
+              os.environ["RUN_ID"],
+              os.environ["TITLE"],
+              os.environ["TOPIC"],
+              "DONE",
+              now,
+              video_url
+          ]]
+
+          sheet_range = (
+              os.environ.get("GOOGLE_SHEET_RANGE")
+              or "Sheet1!A:F"
+          )
+
+          sheets.spreadsheets().values().append(
+              spreadsheetId=sheet_id,
+              range=sheet_range,
+              valueInputOption="USER_ENTERED",
+              insertDataOption="INSERT_ROWS",
+              body={
+                  "values": row
+              }
+          ).execute()
+
+          print("Google Sheet updated successfully.")
+          print("Final video:", video_url)
+
           PY
+
+      - name: Upload GitHub artifact backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: short-${{ inputs.run_id }}
+          path: out/short.mp4
+          if-no-files-found: error
