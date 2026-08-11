@@ -7,18 +7,22 @@ on:
         description: "Unique run ID"
         required: true
         type: string
+
       topic:
         description: "Video topic"
         required: true
         type: string
+
       script:
         description: "Complete narration script"
         required: true
         type: string
+
       title:
         description: "Video title"
         required: true
         type: string
+
       visuals:
         description: "JSON array of per-section visual assets"
         required: true
@@ -90,7 +94,6 @@ jobs:
       - name: Render Short
         env:
           RUN_ID: ${{ inputs.run_id }}
-          TOPIC: ${{ inputs.topic }}
           SCRIPT: ${{ inputs.script }}
           TITLE: ${{ inputs.title }}
           VISUALS_JSON: ${{ inputs.visuals }}
@@ -135,7 +138,6 @@ jobs:
           MAX_DURATION = 60.0
           TARGET_MAX = 59.5
 
-          SCENE_TOLERANCE = 0.20
           FINAL_TOLERANCE = 0.25
 
 
@@ -145,6 +147,10 @@ jobs:
 
           if not SCRIPT:
               raise SystemExit("ERROR: SCRIPT is empty")
+
+
+          if not VISUALS_RAW:
+              raise SystemExit("ERROR: VISUALS_JSON is empty")
 
 
           # ============================================================
@@ -161,7 +167,6 @@ jobs:
 
 
           if isinstance(visuals, dict):
-
               visuals = (
                   visuals.get("visuals")
                   or visuals.get("sections")
@@ -170,32 +175,24 @@ jobs:
 
 
           if not isinstance(visuals, list):
-
               raise SystemExit(
                   "ERROR: VISUALS must be a JSON array"
               )
 
 
-          print(
-              "Visual assets supplied:",
-              len(visuals)
-          )
+          print("Visual assets supplied:", len(visuals))
 
 
           if len(visuals) < 2:
-
               raise SystemExit(
                   "ERROR: Fewer than 2 visual sections were supplied. "
-                  "Rendering stopped to prevent one visual being reused "
-                  "throughout the video."
+                  "Rendering stopped."
               )
 
 
           def clean_text(value):
-
               if value is None:
                   return ""
-
               return str(value).strip()
 
 
@@ -227,7 +224,6 @@ jobs:
                           or
                           value.startswith("http://")
                       ):
-
                           return value
 
               return None
@@ -235,6 +231,10 @@ jobs:
 
           # ============================================================
           # VALIDATE EACH SECTION
+          #
+          # IMPORTANT:
+          # Each visual object remains permanently paired with its own
+          # narration. No later stage is allowed to reorder them.
           # ============================================================
 
           section_inputs = []
@@ -243,7 +243,6 @@ jobs:
           for index, item in enumerate(visuals):
 
               if not isinstance(item, dict):
-
                   raise SystemExit(
                       f"ERROR: Visual section {index + 1} "
                       "is not an object."
@@ -267,7 +266,6 @@ jobs:
 
 
               if not url:
-
                   raise SystemExit(
                       f"ERROR: Visual section {index + 1} "
                       "has no usable URL."
@@ -275,7 +273,6 @@ jobs:
 
 
               if not narration:
-
                   raise SystemExit(
                       f"ERROR: Visual section {index + 1} "
                       "has no narration."
@@ -298,6 +295,8 @@ jobs:
 
           # ============================================================
           # DOWNLOAD EXACTLY ONE VISUAL PER SECTION
+          #
+          # Scene index is preserved.
           # ============================================================
 
           downloaded = []
@@ -339,7 +338,6 @@ jobs:
 
 
                       if not data:
-
                           raise RuntimeError(
                               "Empty response"
                           )
@@ -391,6 +389,7 @@ jobs:
                           ),
                           "narration": section["narration"],
                           "query": section["query"],
+                          "url": url,
                       })
 
 
@@ -431,6 +430,10 @@ jobs:
 
           # ============================================================
           # KOKORO AUDIO — ONE WAV PER SECTION
+          #
+          # IMPORTANT:
+          # Audio is generated from the exact narration belonging to
+          # the exact visual section.
           # ============================================================
 
           print(
@@ -473,23 +476,17 @@ jobs:
 
 
                   if audio_chunk.size:
-
-                      chunks.append(
-                          audio_chunk
-                      )
+                      chunks.append(audio_chunk)
 
 
               if not chunks:
-
                   raise SystemExit(
                       f"ERROR: Kokoro produced no audio "
                       f"for section {index + 1}"
                   )
 
 
-              audio = np.concatenate(
-                  chunks
-              )
+              audio = np.concatenate(chunks)
 
 
               duration = (
@@ -541,8 +538,10 @@ jobs:
           # ============================================================
           # IF TOTAL AUDIO > 59.5s
           #
-          # Speed every section by the SAME factor.
-          # This preserves relative scene timing.
+          # SAME SPEED FACTOR FOR EVERY SECTION.
+          #
+          # This is important because changing each section separately
+          # could alter the visual/audio relationship.
           # ============================================================
 
           if original_total > TARGET_MAX:
@@ -553,18 +552,25 @@ jobs:
               )
 
 
+              if factor > 2.0:
+
+                  raise SystemExit(
+                      "ERROR: Narration is too long. "
+                      f"Required speed factor is {factor:.3f}x. "
+                      "Maximum supported automatic factor is 2.0x. "
+                      "Shorten the script before rendering."
+                  )
+
+
               factor = max(
                   1.01,
-                  min(
-                      factor,
-                      2.0
-                  )
+                  factor
               )
 
 
               print(
                   f"Applying uniform audio speed: "
-                  f"{factor:.6f}"
+                  f"{factor:.6f}x"
               )
 
 
@@ -626,7 +632,7 @@ jobs:
           # ============================================================
           # MINIMUM 30s
           #
-          # Padding is ONLY added to final scene.
+          # Padding only goes to the LAST section.
           # ============================================================
 
           total_after_speed = sum(
@@ -710,10 +716,7 @@ jobs:
 
 
           # ============================================================
-          # CREATE FINAL AUDIO
-          #
-          # Audio is concatenated first so the exact audio timeline
-          # becomes the master timeline.
+          # CREATE MASTER AUDIO
           # ============================================================
 
           audio_concat = (
@@ -790,20 +793,23 @@ jobs:
           # ============================================================
           # BUILD ONE FFmpeg FILTER GRAPH
           #
-          # THIS IS THE CORE SYNC FIX.
+          # CRITICAL FIX:
           #
-          # Each visual is explicitly:
+          # ALL visual inputs are added FIRST.
           #
-          #   trim -> setpts=PTS-STARTPTS
+          # Then ALL audio inputs are added AFTER them.
           #
-          # Each audio section is explicitly:
+          # Therefore:
           #
-          #   atrim -> asetpts=PTS-STARTPTS
+          # visual 0 = input 0
+          # visual 1 = input 1
+          # visual 2 = input 2
           #
-          # Then concat happens INSIDE ONE FFmpeg graph.
+          # audio 0 = input N
+          # audio 1 = input N+1
+          # audio 2 = input N+2
           #
-          # Therefore scene N visual and scene N audio start at
-          # exactly the same timestamp.
+          # This matches audio_input_index below.
           # ============================================================
 
           input_args = []
@@ -814,18 +820,17 @@ jobs:
           audio_labels = []
 
 
+          # ============================================================
+          # FIRST: ADD ALL VISUAL INPUTS
+          # ============================================================
+
           for i, item in enumerate(section_audio):
 
               visual = item["visual"]
 
               source = visual["path"]
               kind = visual["kind"]
-              duration = item["duration"]
 
-
-              # --------------------------------------------------------
-              # VISUAL INPUT
-              # --------------------------------------------------------
 
               if kind == "image":
 
@@ -852,19 +857,14 @@ jobs:
                   )
 
 
-              # --------------------------------------------------------
-              # AUDIO INPUT
-              #
-              # It comes AFTER all visual inputs, so its index is:
-              #
-              # number_of_scenes + scene_index
-              # --------------------------------------------------------
+          # ============================================================
+          # SECOND: ADD ALL AUDIO INPUTS
+          # ============================================================
 
-              audio_input_index = (
-                  len(section_audio) +
-                  i
-              )
+          scene_count = len(section_audio)
 
+
+          for i, item in enumerate(section_audio):
 
               input_args.extend(
                   [
@@ -874,29 +874,49 @@ jobs:
               )
 
 
+          # ============================================================
+          # NOW BUILD EACH A/V SCENE
+          # ============================================================
+
+          for i, item in enumerate(section_audio):
+
+              visual = item["visual"]
+              duration = item["duration"]
+
+              source = visual["path"]
+              kind = visual["kind"]
+
+
               # --------------------------------------------------------
-              # EXACT VISUAL DURATION
+              # VIDEO INPUT INDEX
               # --------------------------------------------------------
 
-              visual_filter = (
-                  f"[{i}:v:0]"
-                  f"trim=duration={duration:.6f},"
-                  "setpts=PTS-STARTPTS,"
-                  "scale=1080:1920:"
-                  "force_original_aspect_ratio=decrease"
-                  "[fg0]"
+              video_input_index = i
+
+
+              # --------------------------------------------------------
+              # AUDIO INPUT INDEX
+              #
+              # Because ALL visual inputs were added first:
+              #
+              # audio input = scene_count + i
+              # --------------------------------------------------------
+
+              audio_input_index = (
+                  scene_count +
+                  i
               )
 
 
-              # Background + proportional foreground.
+              # --------------------------------------------------------
+              # VISUAL
               #
-              # The actual foreground is NEVER enlarged to fill the
-              # entire 9:16 frame. This prevents excessive zoom.
-              #
-              # Background is only used to fill unused space.
+              # The foreground keeps its aspect ratio.
+              # Background fills the 9:16 canvas.
+              # --------------------------------------------------------
 
               visual_filter = (
-                  f"[{i}:v:0]"
+                  f"[{video_input_index}:v:0]"
                   f"trim=duration={duration:.6f},"
                   "setpts=PTS-STARTPTS,"
                   "split=2[base][fgsrc];"
@@ -928,7 +948,10 @@ jobs:
 
 
               # --------------------------------------------------------
-              # EXACT AUDIO DURATION
+              # AUDIO
+              #
+              # Audio begins at exactly the same local timestamp
+              # as its corresponding visual.
               # --------------------------------------------------------
 
               audio_filter = (
@@ -962,10 +985,17 @@ jobs:
 
 
           # ============================================================
-          # CONCAT ALL A/V PAIRS
+          # CONCAT A/V PAIRS
+          #
+          # [v0][a0]
+          # [v1][a1]
+          # [v2][a2]
+          #
+          # Each visual is permanently paired with its own narration.
           # ============================================================
 
           concat_inputs = ""
+
 
           for i in range(len(section_audio)):
 
@@ -988,9 +1018,7 @@ jobs:
 
 
           filter_complex = (
-              ";".join(
-                  filter_parts
-              )
+              ";".join(filter_parts)
               +
               ";"
               +
@@ -1024,6 +1052,7 @@ jobs:
               [
                   "ffmpeg",
                   "-y",
+
                   *input_args,
 
                   "-filter_complex",
@@ -1161,8 +1190,6 @@ jobs:
 
           # ============================================================
           # SUBTITLE TIMELINE
-          #
-          # Uses EXACT same section durations used by the master graph.
           # ============================================================
 
           def timestamp(seconds):
@@ -1209,7 +1236,6 @@ jobs:
 
 
               chunks = []
-
               current = []
 
 
@@ -1237,7 +1263,6 @@ jobs:
 
 
               if current:
-
                   chunks.append(
                       " ".join(current)
                   )
@@ -1280,7 +1305,6 @@ jobs:
 
 
                   if not parts:
-
                       parts = [
                           section["narration"]
                       ]
@@ -1550,14 +1574,12 @@ jobs:
 
 
           if size <= 0:
-
               raise SystemExit(
                   "ERROR: final-short.mp4 is empty"
               )
 
 
           if final_duration < 29.5:
-
               raise SystemExit(
                   f"ERROR: Final video too short: "
                   f"{final_duration:.6f}s"
@@ -1565,7 +1587,6 @@ jobs:
 
 
           if final_duration > 60.5:
-
               raise SystemExit(
                   f"ERROR: Final video too long: "
                   f"{final_duration:.6f}s"
