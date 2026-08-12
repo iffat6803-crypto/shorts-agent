@@ -36,7 +36,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y ffmpeg espeak-ng python3-pip fonts-dejavu-core wget
+          sudo apt-get install -y ffmpeg espeak-ng python3-pip fonts-dejavu-core wget libass-dev
 
       - name: Install Python packages
         run: |
@@ -57,7 +57,7 @@ jobs:
           wget -O bg_music.mp3 "https://www.chosic.com/wp-content/uploads/2021/04/The-Enigma-TNG-The-Deep-Web.mp3" || true
 
           cat > render.py <<'PY'
-          import json, os, pathlib, subprocess, urllib.request, numpy as np, soundfile as sf, random, textwrap
+          import json, os, pathlib, subprocess, urllib.request, numpy as np, soundfile as sf, random
           from kokoro import KPipeline
 
           OUT = pathlib.Path("out")
@@ -73,6 +73,25 @@ jobs:
               req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
               with urllib.request.urlopen(req, timeout=60) as resp:
                   with open(dest, "wb") as f: f.write(resp.read())
+
+          def create_ass(words, dur, output_path):
+              # Professional ASS Subtitle format with word-level pop
+              header = (
+                  "[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n\n"
+                  "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+                  "Style: Default,DejaVu Sans,110,&H0000FFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,6,0,5,50,50,960,1\n\n"
+                  "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+              )
+              with open(output_path, "w") as f:
+                  f.write(header)
+                  word_dur = dur / len(words)
+                  current_time = 0
+                  for word in words:
+                      start_ts = f"{int(current_time//3600):01}:{int((current_time%3600)//60):02}:{current_time%60:05.2f}"
+                      end_time = current_time + word_dur
+                      end_ts = f"{int(end_time//3600):01}:{int((end_time%3600)//60):02}:{end_time%60:05.2f}"
+                      f.write(f"Dialogue: 0,{start_ts},{end_ts},Default,,0,0,0,,{word.upper()}\n")
+                      current_time = end_time
 
           visuals = json.loads(os.environ["VISUALS_JSON"])
           if isinstance(visuals, dict): visuals = visuals.get("visuals") or [visuals]
@@ -93,36 +112,21 @@ jobs:
               subprocess.run(["ffmpeg", "-y", "-i", str(OUT / "temp.wav"), "-ar", str(OUTPUT_AUDIO_RATE), "-ac", "1", str(wav_path)], check=True)
               dur = get_duration(wav_path)
 
-              # Subtitles Logic: Word-by-Word
-              words = narration.split()
-              total_chars = sum(len(w) for w in words)
-              current_time = 0
-              sub_filters = []
-              for word in words:
-                  word_dur = (len(word) / total_chars) * dur
-                  clean_word = word.upper().replace("'", "").replace(":", "").replace('"', "")
-                  start, end = current_time, current_time + word_dur
-                  # Center placement, Yellow, Bold, Black Border
-                  sub_filters.append(f"drawtext=text='{clean_word}':fontcolor=yellow:fontsize=100:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:x=(w-text_w)/2:y=(h-text_h)/2:borderw=5:bordercolor=black:enable='between(t,{start:.2f},{end:.2f})'")
-                  current_time += word_dur
+              # Create Subtitles
+              ass_path = OUT / f"sub_{i}.ass"
+              create_ass(narration.split(), dur, ass_path)
 
-              # STABLE CINEMATIC MOVEMENT (No zoompan)
-              # Slight scale animation using overlay/crop
-              v_filt = (f"scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
-                        f"curves=preset=darker,vignette=PI/4,"
-                        f"{','.join(sub_filters)},"
-                        f"tpad=stop_mode=clone:stop_duration={dur:.6f},trim=duration={dur:.6f},setpts=PTS-STARTPTS")
-
-              # SCENE RENDERING
+              # SCENE RENDERING (Stable Scale & Crop instead of Zoompan)
               s_p = SCENES_DIR / f"scene_{i:02d}.mp4"
-              # Write filters to a script file to avoid command length limits (Fixes exit status 8)
-              filter_script = OUT / f"filter_{i}.txt"
-              with open(filter_script, "w") as f: f.write(v_filt)
-
+              
+              # Stable zoom-in effect using scale + crop
+              v_filt = (f"scale=1920:-1,crop=1080:1920:'(iw-ow)/2':'(ih-oh)/2-(ih-oh)/2*(t/{dur:.2f})',"
+                        f"vignette=PI/4,ass={ass_path},"
+                        f"tpad=stop_mode=clone:stop_duration={dur:.6f},trim=duration={dur:.6f},setpts=PTS-STARTPTS")
+              
               subprocess.run(["ffmpeg", "-y", "-loop", "1", "-i", str(dest), "-i", str(wav_path), 
-                           "-filter_complex_script", str(filter_script), 
-                           "-map", "[v]" if "[v]" in v_filt else "0:v", "-map", "1:a", 
-                           "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", 
+                           "-filter_complex", f"[0:v]{v_filt}[v];[1:a]asetpts=PTS-STARTPTS,aresample=48000:async=1:first_pts=0,apad=pad_dur={dur:.6f},atrim=duration={dur:.6f},asetpts=PTS-STARTPTS[a]", 
+                           "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", 
                            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-t", f"{dur:.6f}", str(s_p)], check=True)
               scene_files.append(s_p)
 
