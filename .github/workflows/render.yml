@@ -28,6 +28,7 @@ on:
         required: true
         type: string
 
+
 jobs:
   render:
     runs-on: ubuntu-latest
@@ -38,21 +39,24 @@ jobs:
 
     steps:
 
-      # ============================================================
+      # ==========================================================
       # CHECKOUT
-      # ============================================================
+      # ==========================================================
 
       - name: Checkout
         uses: actions/checkout@v4
 
 
-      # ============================================================
+      # ==========================================================
       # SYSTEM PACKAGES
-      # ============================================================
+      # ==========================================================
 
       - name: Install system packages
         run: |
+          set -euo pipefail
+
           sudo apt-get update
+
           sudo apt-get install -y \
             ffmpeg \
             espeak-ng \
@@ -65,12 +69,14 @@ jobs:
           ffprobe -version | head -n 1
 
 
-      # ============================================================
+      # ==========================================================
       # PYTHON PACKAGES
-      # ============================================================
+      # ==========================================================
 
       - name: Install Python packages
         run: |
+          set -euo pipefail
+
           python3 -m pip install --upgrade pip
 
           python3 -m pip install --no-cache-dir \
@@ -84,12 +90,14 @@ jobs:
             google-auth-oauthlib
 
 
-      # ============================================================
+      # ==========================================================
       # VERIFY PYTHON
-      # ============================================================
+      # ==========================================================
 
       - name: Verify Python packages
         run: |
+          set -euo pipefail
+
           python3 - <<'PY'
           import sys
           import numpy
@@ -105,9 +113,9 @@ jobs:
           PY
 
 
-      # ============================================================
+      # ==========================================================
       # SHOW INPUTS
-      # ============================================================
+      # ==========================================================
 
       - name: Show received inputs
         env:
@@ -116,15 +124,17 @@ jobs:
           TITLE: ${{ inputs.title }}
           SCRIPT: ${{ inputs.script }}
         run: |
+          set -euo pipefail
+
           echo "Run ID: $RUN_ID"
           echo "Topic: $TOPIC"
           echo "Title: $TITLE"
           echo "Script words: $(printf '%s' "$SCRIPT" | wc -w)"
 
 
-      # ============================================================
+      # ==========================================================
       # MAIN RENDER
-      # ============================================================
+      # ==========================================================
 
       - name: Render Short
         env:
@@ -135,6 +145,8 @@ jobs:
 
         run: |
 
+          set -euo pipefail
+
           cat > render.py <<'PY'
 
           import json
@@ -144,7 +156,6 @@ jobs:
           import subprocess
           import urllib.request
           import urllib.parse
-          import hashlib
 
           import numpy as np
           import soundfile as sf
@@ -152,9 +163,9 @@ jobs:
           from kokoro import KPipeline
 
 
-          # ========================================================
+          # ======================================================
           # CONFIG
-          # ========================================================
+          # ======================================================
 
           OUT = pathlib.Path("out")
           OUT.mkdir(parents=True, exist_ok=True)
@@ -184,9 +195,9 @@ jobs:
           MAX_VISUAL_DOWNLOAD_BYTES = 150 * 1024 * 1024
 
 
-          # ========================================================
+          # ======================================================
           # HELPERS
-          # ========================================================
+          # ======================================================
 
           def fail(message):
               raise SystemExit("ERROR: " + message)
@@ -198,10 +209,7 @@ jobs:
               print(description)
               print("------------------------------------------------")
 
-              subprocess.run(
-                  command,
-                  check=True
-              )
+              subprocess.run(command, check=True)
 
 
           def ffprobe_value(args):
@@ -221,7 +229,13 @@ jobs:
                       + " ".join(args)
                   )
 
-              return float(result)
+              try:
+                  return float(result)
+              except ValueError:
+                  fail(
+                      "ffprobe returned invalid numeric value: "
+                      + result
+                  )
 
 
           def get_duration(path):
@@ -278,12 +292,6 @@ jobs:
 
 
           def canonical_url(url):
-              """
-              Remove tracking/query parameters so the same Pexels
-              asset cannot bypass duplicate detection through URLs
-              such as ?dl=1 or other tracking parameters.
-              """
-
               if not url:
                   return ""
 
@@ -311,7 +319,6 @@ jobs:
 
 
           def get_visual_id(item):
-
               if not isinstance(item, dict):
                   return ""
 
@@ -321,7 +328,6 @@ jobs:
                   "asset_id",
                   "id"
               ):
-
                   value = item.get(key)
 
                   if value is not None:
@@ -334,13 +340,8 @@ jobs:
 
 
           def get_url(item):
-
               if not isinstance(item, dict):
                   return None
-
-              # IMPORTANT:
-              # Prefer video_url, then image_url.
-              # This preserves the n8n visual contract.
 
               for key in (
                   "video_url",
@@ -353,11 +354,9 @@ jobs:
                   "image_link",
                   "thumbnail"
               ):
-
                   value = item.get(key)
 
                   if isinstance(value, str):
-
                       value = value.strip()
 
                       if (
@@ -371,7 +370,6 @@ jobs:
 
 
           def detect_is_image(content_type, url):
-
               content_type = (
                   content_type or ""
               ).lower()
@@ -399,7 +397,6 @@ jobs:
 
 
           def download_streaming(url, destination):
-
               request = urllib.request.Request(
                   url,
                   headers={
@@ -428,9 +425,7 @@ jobs:
                   )
 
                   if content_length:
-
                       try:
-
                           content_length = int(
                               content_length
                           )
@@ -440,7 +435,6 @@ jobs:
                               >
                               MAX_VISUAL_DOWNLOAD_BYTES
                           ):
-
                               fail(
                                   "Visual is too large: "
                                   f"{content_length} bytes"
@@ -458,7 +452,6 @@ jobs:
                   ) as output:
 
                       while True:
-
                           chunk = response.read(
                               1024 * 1024
                           )
@@ -473,7 +466,6 @@ jobs:
                               >
                               MAX_VISUAL_DOWNLOAD_BYTES
                           ):
-
                               output.close()
 
                               try:
@@ -504,9 +496,9 @@ jobs:
               return content_type
 
 
-          # ========================================================
+          # ======================================================
           # BASIC VALIDATION
-          # ========================================================
+          # ======================================================
 
           if not SCRIPT:
               fail("SCRIPT is empty")
@@ -515,18 +507,16 @@ jobs:
               fail("VISUALS_JSON is empty")
 
 
-          # ========================================================
+          # ======================================================
           # PARSE VISUALS
-          # ========================================================
+          # ======================================================
 
           try:
-
               visuals = json.loads(
                   VISUALS_RAW
               )
 
           except Exception as exc:
-
               fail(
                   "VISUALS is not valid JSON: "
                   + str(exc)
@@ -534,7 +524,6 @@ jobs:
 
 
           if isinstance(visuals, dict):
-
               visuals = (
                   visuals.get("visuals")
                   or
@@ -545,7 +534,6 @@ jobs:
 
 
           if not isinstance(visuals, list):
-
               fail(
                   "VISUALS must be a JSON array"
               )
@@ -558,40 +546,31 @@ jobs:
 
 
           if len(visuals) < 2:
-
               fail(
                   "Fewer than 2 visual sections supplied"
               )
 
 
           if len(visuals) > 12:
-
               fail(
                   "More than 12 visual sections supplied"
               )
 
 
-          # ========================================================
+          # ======================================================
           # VALIDATE + SORT SECTION MAPPING
-          #
-          # section_index is authoritative.
-          # This prevents narration N from accidentally attaching
-          # to visual N+1.
-          # ========================================================
+          # ======================================================
 
           section_inputs = []
 
           seen_indexes = set()
-
           seen_urls = set()
-
           seen_visual_ids = set()
 
 
           for fallback_index, item in enumerate(visuals):
 
               if not isinstance(item, dict):
-
                   fail(
                       f"Visual section {fallback_index + 1} "
                       "is not an object"
@@ -602,27 +581,21 @@ jobs:
                   "section_index"
               )
 
-
               if raw_index is None:
-
                   raw_index = item.get(
                       "index"
                   )
 
-
               if raw_index is None:
-
                   raw_index = fallback_index
 
 
               try:
-
                   section_index = int(
                       raw_index
                   )
 
               except Exception:
-
                   fail(
                       f"Invalid section_index: "
                       f"{raw_index}"
@@ -630,7 +603,6 @@ jobs:
 
 
               if section_index in seen_indexes:
-
                   fail(
                       "Duplicate section_index detected: "
                       f"{section_index}"
@@ -644,7 +616,6 @@ jobs:
               url = get_url(item)
 
               if not url:
-
                   fail(
                       f"Section {section_index + 1} "
                       "has no usable visual URL"
@@ -657,13 +628,11 @@ jobs:
 
 
               if normalized_url in seen_urls:
-
                   fail(
                       "DUPLICATE VISUAL DETECTED. "
                       "The same canonical visual URL was supplied "
                       f"more than once: {normalized_url}"
                   )
-
 
               seen_urls.add(
                   normalized_url
@@ -676,9 +645,7 @@ jobs:
 
 
               if visual_id:
-
                   if visual_id in seen_visual_ids:
-
                       fail(
                           "DUPLICATE VISUAL ASSET ID DETECTED: "
                           + visual_id
@@ -706,7 +673,6 @@ jobs:
 
 
               if not narration:
-
                   fail(
                       f"Section {section_index + 1} "
                       "has no narration"
@@ -756,7 +722,6 @@ jobs:
 
 
           if actual_indexes != expected_indexes:
-
               fail(
                   "section_index values must be "
                   "sequential starting at 0. "
@@ -770,12 +735,9 @@ jobs:
           )
 
 
-          # ========================================================
+          # ======================================================
           # DOWNLOAD ONE VISUAL PER SECTION
-          #
-          # Streaming download prevents large HTTP responses from
-          # being held entirely in Python memory.
-          # ========================================================
+          # ======================================================
 
           downloaded = []
 
@@ -798,20 +760,9 @@ jobs:
               )
 
 
-              extension_hint = ".bin"
-
-              if detect_is_image(
-                  "",
-                  url
-              ):
-
-                  extension_hint = ".jpg"
-
-
               destination = (
                   OUT /
-                  f"source_{index}"
-                  f"{extension_hint}"
+                  f"source_{index}.bin"
               )
 
 
@@ -823,7 +774,6 @@ jobs:
                   try:
 
                       if destination.exists():
-
                           destination.unlink()
 
 
@@ -842,33 +792,24 @@ jobs:
 
 
                       if is_image:
-
                           final_path = (
                               OUT /
                               f"source_{index}.jpg"
                           )
-
                       else:
-
                           final_path = (
                               OUT /
                               f"source_{index}.mp4"
                           )
 
 
-                      if (
+                      if final_path.exists():
+                          final_path.unlink()
+
+
+                      destination.rename(
                           final_path
-                          !=
-                          destination
-                      ):
-
-                          if final_path.exists():
-
-                              final_path.unlink()
-
-                          destination.rename(
-                              final_path
-                          )
+                      )
 
 
                       downloaded.append(
@@ -934,7 +875,6 @@ jobs:
 
 
               if not success:
-
                   fail(
                       f"Could not download visual "
                       f"for section {index + 1}"
@@ -944,18 +884,15 @@ jobs:
           if len(downloaded) != len(
               section_inputs
           ):
-
               fail(
                   "Every narration section must "
                   "have exactly one visual"
               )
 
 
-          # ========================================================
-          # KOKORO
-          #
-          # ONE AUDIO FILE PER SECTION
-          # ========================================================
+          # ======================================================
+          # KOKORO TTS
+          # ======================================================
 
           print("")
           print(
@@ -1006,14 +943,12 @@ jobs:
 
 
                   if audio_chunk.size:
-
                       chunks.append(
                           audio_chunk
                       )
 
 
               if not chunks:
-
                   fail(
                       "Kokoro produced no audio "
                       f"for section {index + 1}"
@@ -1037,9 +972,6 @@ jobs:
                   SAMPLE_RATE
               )
 
-
-              # Normalize every section to the SAME
-              # audio format before rendering.
 
               normalized_wav = (
                   OUT /
@@ -1071,7 +1003,6 @@ jobs:
 
 
               if duration <= 0:
-
                   fail(
                       f"Invalid audio duration "
                       f"for section {index + 1}"
@@ -1110,9 +1041,9 @@ jobs:
                   pass
 
 
-          # ========================================================
+          # ======================================================
           # TOTAL AUDIO DURATION
-          # ========================================================
+          # ======================================================
 
           original_total = sum(
               item["duration"]
@@ -1126,12 +1057,9 @@ jobs:
           )
 
 
-          # ========================================================
-          # IF TOO LONG
-          #
-          # Same atempo factor is applied to every section so the
-          # relative scene timing remains consistent.
-          # ========================================================
+          # ======================================================
+          # TOO LONG -> UNIFORM ATEMPO
+          # ======================================================
 
           if original_total > TARGET_MAX:
 
@@ -1142,7 +1070,6 @@ jobs:
 
 
               if factor > 2.0:
-
                   fail(
                       "Narration is too long. "
                       f"Required speed factor: {factor:.3f}x. "
@@ -1205,16 +1132,12 @@ jobs:
 
 
                   item["path"] = normalized
-                  item["duration"] = (
-                      new_duration
-                  )
+                  item["duration"] = new_duration
 
 
-          # ========================================================
+          # ======================================================
           # MINIMUM 30 SECONDS
-          #
-          # Only the LAST scene receives silence padding.
-          # ========================================================
+          # ======================================================
 
           total_after_speed = sum(
               item["duration"]
@@ -1290,7 +1213,6 @@ jobs:
           if final_audio_duration > (
               MAX_DURATION + 0.05
           ):
-
               fail(
                   "Audio exceeds 60 seconds: "
                   f"{final_audio_duration:.6f}s"
@@ -1300,30 +1222,15 @@ jobs:
           if final_audio_duration < (
               MIN_DURATION - 0.10
           ):
-
               fail(
                   "Audio is below 30 seconds after "
                   f"normalization: {final_audio_duration:.6f}s"
               )
 
 
-          # ========================================================
-          # RENDER EACH SCENE AS ONE COMPLETE A/V UNIT
-          #
-          # THIS IS THE IMPORTANT SYNC FIX.
-          #
-          # Scene 0:
-          #   visual 0 + narration 0
-          #
-          # Scene 1:
-          #   visual 1 + narration 1
-          #
-          # etc.
-          #
-          # They are rendered together into separate MP4 files.
-          # Only AFTER all scenes pass A/V validation are they
-          # concatenated.
-          # ========================================================
+          # ======================================================
+          # RENDER EACH COMPLETE A/V SCENE
+          # ======================================================
 
           scene_files = []
 
@@ -1372,23 +1279,6 @@ jobs:
                   "================================================"
               )
 
-              print(
-                  f"Visual: {visual_path}"
-              )
-
-              print(
-                  f"Audio: {audio_path}"
-              )
-
-              print(
-                  f"Expected duration: "
-                  f"{duration:.6f}s"
-              )
-
-
-              # ----------------------------------------------------
-              # IMAGE
-              # ----------------------------------------------------
 
               if visual_kind == "image":
 
@@ -1400,10 +1290,6 @@ jobs:
                       "-i",
                       str(visual_path)
                   ]
-
-              # ----------------------------------------------------
-              # VIDEO
-              # ----------------------------------------------------
 
               else:
 
@@ -1420,14 +1306,6 @@ jobs:
                   str(audio_path)
               ]
 
-
-              # ----------------------------------------------------
-              # VIDEO FILTER
-              #
-              # PTS is reset to zero for every scene.
-              # This prevents inherited timestamps from previous
-              # source media.
-              # ----------------------------------------------------
 
               video_filter = (
                   "[0:v:0]"
@@ -1458,14 +1336,6 @@ jobs:
               )
 
 
-              # ----------------------------------------------------
-              # AUDIO FILTER
-              #
-              # Audio PTS is independently reset to zero.
-              # It starts at the exact same local timestamp as
-              # the scene visual.
-              # ----------------------------------------------------
-
               audio_filter = (
                   "[1:a:0]"
                   "asetpts=PTS-STARTPTS,"
@@ -1479,10 +1349,8 @@ jobs:
 
               filter_complex = (
                   video_filter
-                  +
-                  ";"
-                  +
-                  audio_filter
+                  + ";"
+                  + audio_filter
               )
 
 
@@ -1543,9 +1411,9 @@ jobs:
               )
 
 
-              # ----------------------------------------------------
+              # ==================================================
               # SCENE VALIDATION
-              # ----------------------------------------------------
+              # ==================================================
 
               scene_video_duration = (
                   get_video_duration(
@@ -1553,13 +1421,11 @@ jobs:
                   )
               )
 
-
               scene_audio_duration = (
                   get_audio_duration(
                       scene_path
                   )
               )
-
 
               scene_container_duration = (
                   get_duration(
@@ -1594,7 +1460,6 @@ jobs:
               if scene_av_diff > (
                   SCENE_TOLERANCE
               ):
-
                   fail(
                       f"SCENE {index + 1} A/V "
                       "MISMATCH: "
@@ -1609,7 +1474,6 @@ jobs:
                   -
                   scene_audio_duration
               ) > SCENE_TOLERANCE:
-
                   fail(
                       f"SCENE {index + 1} CONTAINER "
                       "TIMELINE MISMATCH: "
@@ -1628,14 +1492,9 @@ jobs:
               )
 
 
-          # ========================================================
+          # ======================================================
           # CONCATENATE COMPLETE A/V SCENES
-          #
-          # At this point every scene is already a synchronized
-          # audio/video unit.
-          #
-          # We do NOT concatenate audio and video separately.
-          # ========================================================
+          # ======================================================
 
           concat_file = (
               OUT /
@@ -1710,9 +1569,9 @@ jobs:
           )
 
 
-          # ========================================================
+          # ======================================================
           # MASTER A/V VALIDATION
-          # ========================================================
+          # ======================================================
 
           base_video_duration = (
               get_video_duration(
@@ -1720,13 +1579,11 @@ jobs:
               )
           )
 
-
           base_audio_duration = (
               get_audio_duration(
                   base_final
               )
           )
-
 
           base_duration = (
               get_duration(
@@ -1773,7 +1630,6 @@ jobs:
           if base_av_diff > (
               FINAL_TOLERANCE
           ):
-
               fail(
                   "MASTER A/V MISMATCH: "
                   f"video={base_video_duration:.6f}s "
@@ -1785,7 +1641,6 @@ jobs:
           if base_duration < (
               MIN_DURATION - 0.20
           ):
-
               fail(
                   "Master video is shorter than 30 seconds: "
                   f"{base_duration:.6f}s"
@@ -1795,7 +1650,6 @@ jobs:
           if base_duration > (
               MAX_DURATION + 0.20
           ):
-
               fail(
                   "Master video exceeds 60 seconds: "
                   f"{base_duration:.6f}s"
@@ -1807,11 +1661,9 @@ jobs:
           )
 
 
-          # ========================================================
+          # ======================================================
           # SUBTITLE TIMELINE
-          #
-          # Uses the EXACT measured duration of each scene.
-          # ========================================================
+          # ======================================================
 
           def timestamp(seconds):
 
@@ -1821,24 +1673,20 @@ jobs:
                   )
               )
 
-
               hours, remainder = divmod(
                   total_ms,
                   3600000
               )
-
 
               minutes, remainder = divmod(
                   remainder,
                   60000
               )
 
-
               seconds_int, milliseconds = divmod(
                   remainder,
                   1000
               )
-
 
               return (
                   f"{hours:02d}:"
@@ -1895,9 +1743,6 @@ jobs:
               return chunks
 
 
-          # First obtain ACTUAL durations from the rendered
-          # scene files so subtitles follow the real timeline.
-
           actual_scene_durations = []
 
 
@@ -1951,7 +1796,6 @@ jobs:
 
 
                   if not parts:
-
                       parts = [
                           item["narration"]
                       ]
@@ -2005,7 +1849,6 @@ jobs:
                           local_time
                       )
 
-
                       end = min(
                           section_end,
                           local_time
@@ -2032,12 +1875,9 @@ jobs:
                   )
 
 
-          # ========================================================
+          # ======================================================
           # BURN SUBTITLES
-          #
-          # Audio is copied rather than regenerated.
-          # Therefore subtitle rendering cannot alter narration.
-          # ========================================================
+          # ======================================================
 
           final = pathlib.Path(
               "final-short.mp4"
@@ -2106,12 +1946,11 @@ jobs:
           )
 
 
-          # ========================================================
+          # ======================================================
           # FINAL VALIDATION
-          # ========================================================
+          # ======================================================
 
           if not final.exists():
-
               fail(
                   "final-short.mp4 was not created"
               )
@@ -2121,7 +1960,6 @@ jobs:
 
 
           if size <= 0:
-
               fail(
                   "final-short.mp4 is empty"
               )
@@ -2133,13 +1971,11 @@ jobs:
               )
           )
 
-
           video_duration = (
               get_video_duration(
                   final
               )
           )
-
 
           audio_duration = (
               get_audio_duration(
@@ -2172,30 +2008,25 @@ jobs:
               f"{final_duration:.6f}s"
           )
 
-
           print(
               f"Final video stream: "
               f"{video_duration:.6f}s"
           )
-
 
           print(
               f"Final audio stream: "
               f"{audio_duration:.6f}s"
           )
 
-
           print(
               f"Final A/V difference: "
               f"{final_av_diff:.6f}s"
           )
 
-
           print(
               f"Sections: "
               f"{len(section_audio)}"
           )
-
 
           print(
               f"File size: "
@@ -2203,14 +2034,9 @@ jobs:
           )
 
 
-          # --------------------------------------------------------
-          # DURATION CHECK
-          # --------------------------------------------------------
-
           if final_duration < (
               MIN_DURATION - 0.20
           ):
-
               fail(
                   "FINAL VIDEO TOO SHORT: "
                   f"{final_duration:.6f}s"
@@ -2220,21 +2046,15 @@ jobs:
           if final_duration > (
               MAX_DURATION + 0.20
           ):
-
               fail(
                   "FINAL VIDEO TOO LONG: "
                   f"{final_duration:.6f}s"
               )
 
 
-          # --------------------------------------------------------
-          # A/V CHECK
-          # --------------------------------------------------------
-
           if final_av_diff > (
               FINAL_TOLERANCE
           ):
-
               fail(
                   "FINAL A/V MISMATCH: "
                   f"video={video_duration:.6f}s "
@@ -2242,10 +2062,6 @@ jobs:
                   f"difference={final_av_diff:.6f}s"
               )
 
-
-          # --------------------------------------------------------
-          # FPS CHECK
-          # --------------------------------------------------------
 
           fps_check = subprocess.check_output(
               [
@@ -2272,16 +2088,11 @@ jobs:
 
 
           if fps_check != "30/1":
-
               fail(
                   "FINAL VIDEO IS NOT 30 FPS: "
                   + fps_check
               )
 
-
-          # --------------------------------------------------------
-          # AUDIO CHECK
-          # --------------------------------------------------------
 
           audio_channels = subprocess.check_output(
               [
@@ -2309,7 +2120,6 @@ jobs:
 
 
           if audio_channels != "1":
-
               fail(
                   "FINAL AUDIO IS NOT MONO"
               )
@@ -2349,31 +2159,41 @@ jobs:
           python3 render.py
 
 
-      # ============================================================
+      # ==========================================================
       # GOOGLE DRIVE + SHEETS
-      # ============================================================
+      #
+      # IMPORTANT:
+      # This step runs ONLY when render succeeded.
+      # Missing credentials are a HARD FAILURE.
+      # Drive upload failure is a HARD FAILURE.
+      # Sheets failure is a HARD FAILURE.
+      #
+      # This is required so n8n does NOT log history unless
+      # the actual Drive + Sheets success path completed.
+      # ==========================================================
 
       - name: Upload MP4 to Google Drive and append Sheet row
         if: success()
-        continue-on-error: true
 
         env:
           GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           GOOGLE_SHEET_RANGE: ${{ secrets.GOOGLE_SHEET_RANGE }}
+
           RUN_ID: ${{ inputs.run_id }}
           TOPIC: ${{ inputs.topic }}
           TITLE: ${{ inputs.title }}
 
         run: |
 
+          set -euo pipefail
+
           python3 - <<'PY'
 
           import datetime
           import json
           import os
-          import sys
 
 
           required = [
@@ -2391,17 +2211,18 @@ jobs:
 
 
           if missing:
-
-              print(
-                  "WARNING: Missing Google secrets:",
-                  ", ".join(missing)
+              raise SystemExit(
+                  "ERROR: Missing required Google secrets: "
+                  + ", ".join(missing)
               )
 
-              print(
-                  "Skipping Drive/Sheets upload."
-              )
 
-              sys.exit(0)
+          if not os.path.exists(
+              "final-short.mp4"
+          ):
+              raise SystemExit(
+                  "ERROR: final-short.mp4 does not exist"
+              )
 
 
           from google.oauth2 import service_account
@@ -2464,6 +2285,9 @@ jobs:
           )
 
 
+          print("Uploading final-short.mp4 to Google Drive...")
+
+
           uploaded = (
               drive.files()
               .create(
@@ -2478,40 +2302,40 @@ jobs:
           file_id = uploaded["id"]
 
 
+          print(
+              "Drive upload succeeded:",
+              file_id
+          )
+
+
+          # ------------------------------------------------------
+          # PUBLIC READ ACCESS
+          # ------------------------------------------------------
+
+          drive.permissions().create(
+              fileId=file_id,
+              body={
+                  "type": "anyone",
+                  "role": "reader"
+              },
+              fields="id"
+          ).execute()
+
+
           link = (
-              uploaded.get("webViewLink")
-              or
               f"https://drive.google.com/file/d/"
               f"{file_id}/view"
           )
 
 
-          try:
-
-              drive.permissions().create(
-                  fileId=file_id,
-                  body={
-                      "type": "anyone",
-                      "role": "reader"
-                  },
-                  fields="id"
-              ).execute()
+          print(
+              "Drive public sharing succeeded"
+          )
 
 
-              link = (
-                  f"https://drive.google.com/file/d/"
-                  f"{file_id}/view"
-              )
-
-
-          except Exception as exc:
-
-              print(
-                  "WARNING: Could not enable public "
-                  "Drive sharing:",
-                  exc
-              )
-
+          # ------------------------------------------------------
+          # GOOGLE SHEETS
+          # ------------------------------------------------------
 
           sheet_range = (
               os.environ.get(
@@ -2539,6 +2363,11 @@ jobs:
           ]]
 
 
+          print(
+              "Appending successful render to Google Sheets..."
+          )
+
+
           (
               sheets.spreadsheets()
               .values()
@@ -2558,16 +2387,42 @@ jobs:
 
 
           print(
+              "Google Sheets append succeeded"
+          )
+
+
+          # ------------------------------------------------------
+          # MACHINE-READABLE SUCCESS OUTPUT
+          # ------------------------------------------------------
+
+          print("")
+          print(
               "VIDEO_URL:",
               link
+          )
+
+          print(
+              "UPLOAD_STATUS: SUCCESS"
+          )
+
+          print(
+              "SHEETS_STATUS: SUCCESS"
+          )
+
+          print(
+              "RENDER_PIPELINE_STATUS: SUCCESS"
           )
 
           PY
 
 
-      # ============================================================
+      # ==========================================================
       # GITHUB ARTIFACT BACKUP
-      # ============================================================
+      #
+      # Always runs, including failed renders.
+      # This lets us inspect intermediate files when something
+      # fails.
+      # ==========================================================
 
       - name: Upload GitHub artifact backup
         if: always()
@@ -2579,7 +2434,7 @@ jobs:
 
           path: |
             final-short.mp4
-            out/master_audio.wav
+            out/base-final.mp4
             out/captions.srt
             out/section_*.wav
             out/source_*.jpg
