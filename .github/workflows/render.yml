@@ -7,22 +7,18 @@ on:
         description: "Unique run ID"
         required: true
         type: string
-
       topic:
         description: "Video topic"
         required: true
         type: string
-
       script:
         description: "Complete narration script"
         required: true
         type: string
-
       title:
         description: "Video title"
         required: true
         type: string
-
       visuals:
         description: "JSON array of per-section visual assets"
         required: true
@@ -32,10 +28,6 @@ jobs:
   render:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-
-    permissions:
-      contents: read
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -50,7 +42,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m pip install --upgrade pip
-          python3 -m pip install --no-cache-dir "kokoro>=0.9.4" soundfile numpy torch google-api-python-client google-auth google-auth-httplib2 google-auth-oauthlib
+          python3 -m pip install --no-cache-dir "kokoro>=0.9.4" soundfile numpy torch google-api-python-client
 
       - name: Render Short
         env:
@@ -61,51 +53,42 @@ jobs:
         run: |
           set -euo pipefail
           cat > render.py <<'PY'
-          import json, os, pathlib, re, subprocess, urllib.request, urllib.parse
-          import numpy as np
-          import soundfile as sf
+          import json, os, pathlib, subprocess, urllib.request, numpy as np, soundfile as sf
           from kokoro import KPipeline
 
           OUT = pathlib.Path("out")
           OUT.mkdir(parents=True, exist_ok=True)
           SCENES_DIR = OUT / "scenes"
           SCENES_DIR.mkdir(parents=True, exist_ok=True)
+          SAMPLE_RATE, OUTPUT_AUDIO_RATE, FPS = 24000, 48000, 30
 
-          SCRIPT = os.environ.get("SCRIPT", "").strip()
-          VISUALS_RAW = os.environ.get("VISUALS_JSON", "").strip()
-          SAMPLE_RATE = 24000
-          OUTPUT_AUDIO_RATE = 48000
-          FPS = 30
-          WIDTH, HEIGHT = 1080, 1920
-
-          def fail(message): raise SystemExit("ERROR: " + message)
-          def run_command(command, description):
-              print(f"\n--- {description} ---\n")
-              subprocess.run(command, check=True)
-
-          def ffprobe_value(args):
-              res = subprocess.check_output(["ffprobe", "-v", "error", *args], text=True).strip()
-              if not res: fail("ffprobe no value")
-              return float(res)
-
-          def get_duration(path): return ffprobe_value(["-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)])
-          def get_video_duration(path): return ffprobe_value(["-select_streams", "v:0", "-show_entries", "stream=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)])
-          def get_audio_duration(path): return ffprobe_value(["-select_streams", "a:0", "-show_entries", "stream=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)])
+          def get_duration(path):
+              return float(subprocess.check_output(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)]).strip())
 
           def download_visual(url, dest):
               req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
               with urllib.request.urlopen(req, timeout=60) as resp:
                   ctype = resp.headers.get("Content-Type", "").lower()
                   with open(dest, "wb") as f: f.write(resp.read())
-              is_img = "image" in ctype or any(url.lower().endswith(x) for x in [".jpg", ".jpeg", ".png", ".webp"])
-              return is_img
+              return "image" in ctype or any(url.lower().endswith(x) for x in [".jpg", ".jpeg", ".png", ".webp"])
 
-          # Parse and Download
-          visuals = json.loads(VISUALS_RAW)
+          def wrap_text(text, max_chars=30):
+              words = text.split()
+              lines, current_line = [], []
+              for word in words:
+                  if len(" ".join(current_line + [word])) <= max_chars:
+                      current_line.append(word)
+                  else:
+                      lines.append(" ".join(current_line))
+                      current_line = [word]
+              lines.append(" ".join(current_line))
+              return "\n".join(lines)
+
+          visuals = json.loads(os.environ["VISUALS_JSON"])
           if isinstance(visuals, dict): visuals = visuals.get("visuals") or [visuals]
           
-          downloaded = []
           pipeline = KPipeline(lang_code="a")
+          downloaded_scenes = []
 
           for i, item in enumerate(visuals):
               url = item.get("video_url") or item.get("image_url") or item.get("url")
@@ -115,41 +98,45 @@ jobs:
               final_v = OUT / (f"source_{i}.jpg" if is_img else f"source_{i}.mp4")
               dest.rename(final_v)
               
-              # Generate Audio
+              # Audio Generation
               chunks = [np.asarray(c, dtype=np.float32).reshape(-1) for _, _, c in pipeline(narration, voice="af_heart", speed=1.0)]
-              audio = np.concatenate(chunks)
+              sf.write(OUT / "temp.wav", np.concatenate(chunks), SAMPLE_RATE)
               wav_path = OUT / f"section_{i}.wav"
-              sf.write(OUT / "temp.wav", audio, SAMPLE_RATE)
-              run_command(["ffmpeg", "-y", "-i", str(OUT / "temp.wav"), "-ar", str(OUTPUT_AUDIO_RATE), "-ac", "1", str(wav_path)], "Normalize Audio")
+              subprocess.run(["ffmpeg", "-y", "-i", str(OUT / "temp.wav"), "-ar", str(OUTPUT_AUDIO_RATE), "-ac", "1", str(wav_path)], check=True)
               
               dur = get_duration(wav_path)
-              downloaded.append({"index": i, "visual": final_v, "audio": wav_path, "duration": dur, "kind": "image" if is_img else "video"})
-
-          # Render Scenes with STRICT SYNC
-          scene_files = []
-          for item in downloaded:
-              idx, v_p, a_p, dur = item["index"], item["visual"], item["audio"], item["duration"]
-              s_p = SCENES_DIR / f"scene_{idx:02d}.mp4"
               
-              v_in = ["-loop", "1", "-framerate", str(FPS), "-i", str(v_p)] if item["kind"] == "image" else ["-stream_loop", "-1", "-i", str(v_p)]
+              # SUBTITLES: Wrap text and escape for FFmpeg
+              display_text = wrap_text(narration, max_chars=25).replace("'", "'\\''").replace(":", "\\:")
               
-              # THE SYNC FIX: tpad for video, apad for audio, strict trim
-              v_filt = (f"[0:v:0]setpts=PTS-STARTPTS,scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,crop={WIDTH}:{HEIGHT},boxblur=20:2,setsar=1[bg];"
-                        f"[0:v:0]setpts=PTS-STARTPTS,scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,setsar=1[fg];"
-                        f"[bg][fg]overlay=(W-w)/2:(H-h)/2,fps={FPS},format=yuv420p,"
+              # SCENE RENDERING WITH SYNC AND IMPROVED SUBTITLES
+              s_p = SCENES_DIR / f"scene_{i:02d}.mp4"
+              v_in = ["-loop", "1", "-framerate", "30", "-i", str(final_v)] if is_img else ["-stream_loop", "-1", "-i", str(final_v)]
+              
+              # drawtext: Center-bottom placement, yellow/white text, black box for readability
+              v_filt = (f"[0:v:0]setpts=PTS-STARTPTS,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:2,setsar=1[bg];"
+                        f"[0:v:0]setpts=PTS-STARTPTS,scale=1080:1920:force_original_aspect_ratio=decrease,setsar=1[fg];"
+                        f"[bg][fg]overlay=(W-w)/2:(H-h)/2,fps=30,format=yuv420p,"
+                        f"drawtext=text='{display_text}':fontcolor=yellow:fontsize=75:x=(w-text_w)/2:y=h-450:box=1:boxcolor=black@0.6:boxborderw=20:line_spacing=10,"
                         f"tpad=stop_mode=clone:stop_duration={dur:.6f},trim=duration={dur:.6f},setpts=PTS-STARTPTS[v]")
               
-              a_filt = (f"[1:a:0]asetpts=PTS-STARTPTS,aresample={OUTPUT_AUDIO_RATE}:async=1:first_pts=0,"
+              a_filt = (f"[1:a:0]asetpts=PTS-STARTPTS,aresample=48000:async=1:first_pts=0,"
                         f"apad=pad_dur={dur:.6f},atrim=duration={dur:.6f},asetpts=PTS-STARTPTS[a]")
               
-              run_command(["ffmpeg", "-y", *v_in, "-i", str(a_p), "-filter_complex", f"{v_filt};{a_filt}", 
+              subprocess.run(["ffmpeg", "-y", *v_in, "-i", str(wav_path), "-filter_complex", f"{v_filt};{a_filt}", 
                            "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", 
-                           "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-t", f"{dur:.6f}", str(s_p)], f"Render Scene {idx}")
-              scene_files.append(s_p)
+                           "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-t", f"{dur:.6f}", str(s_p)], check=True)
+              downloaded_scenes.append(s_p)
 
-          # Concat
           with open(OUT / "list.txt", "w") as f:
-              for s in scene_files: f.write(f"file '{s.resolve()}'\n")
-          run_command(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(OUT / "list.txt"), "-c", "copy", "final.mp4"], "Final Concat")
+              for s in downloaded_scenes: f.write(f"file '{s.resolve()}'\n")
+          subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(OUT / "list.txt"), "-c", "copy", "final.mp4"], check=True)
           PY
           python3 render.py
+
+      - name: Upload Video Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-artifact
+          path: final.mp4
+          retention-days: 1
