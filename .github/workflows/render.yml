@@ -67,25 +67,18 @@ jobs:
           SAMPLE_RATE, OUTPUT_AUDIO_RATE, FPS = 24000, 48000, 30
 
           def get_duration(path):
-              try:
-                  res = subprocess.check_output(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)], text=True).strip()
-                  return float(res)
-              except: return 5.0
+              res = subprocess.check_output(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)], text=True).strip()
+              return float(res)
 
           def download_visual(url, dest_base):
-              try:
-                  req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                  with urllib.request.urlopen(req, timeout=45) as resp:
-                      ctype = resp.headers.get("Content-Type", "").lower()
-                      data = resp.read()
-                      ext = ".mp4" if "video" in ctype else ".jpg"
-                      dest = dest_base.with_suffix(ext)
-                      with open(dest, "wb") as f: f.write(data)
-                  return dest, "video" in ctype
-              except:
-                  dest = dest_base.with_suffix(".jpg")
-                  subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=black:s=1080x1920", "-frames:v", "1", str(dest)], check=True)
-                  return dest, False
+              req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+              with urllib.request.urlopen(req, timeout=60) as resp:
+                  ctype = resp.headers.get("Content-Type", "").lower()
+                  data = resp.read()
+                  ext = ".mp4" if "video" in ctype else ".jpg"
+                  dest = dest_base.with_suffix(ext)
+                  with open(dest, "wb") as f: f.write(data)
+              return dest, "video" in ctype
 
           def create_ass(words, dur, output_path):
               header = (
@@ -98,7 +91,7 @@ jobs:
                   f.write(header)
                   word_dur = dur / len(words)
                   current_time = 0
-                  for i, word in enumerate(words):
+                  for word in words:
                       start_ts = f"{int(current_time//3600):01}:{int((current_time%3600)//60):02}:{current_time%60:05.2f}"
                       end_time = current_time + word_dur
                       end_ts = f"{int(end_time//3600):01}:{int((end_time%3600)//60):02}:{end_time%60:05.2f}"
@@ -114,21 +107,25 @@ jobs:
           for i, item in enumerate(visuals):
               url = item.get("video_url") or item.get("image_url") or item.get("url")
               narration = item.get("narration") or item.get("text")
+              
               v_p, is_video = download_visual(url, OUT / f"source_{i}")
               
+              # Audio Generation
               chunks = [np.asarray(c, dtype=np.float32).reshape(-1) for _, _, c in pipeline(narration, voice="af_heart", speed=1.1)]
               sf.write(OUT / "temp.wav", np.concatenate(chunks), SAMPLE_RATE)
               wav_path = OUT / f"section_{i}.wav"
               subprocess.run(["ffmpeg", "-y", "-i", str(OUT / "temp.wav"), "-ar", str(OUTPUT_AUDIO_RATE), "-ac", "1", str(wav_path)], check=True)
               dur = get_duration(wav_path)
 
+              # Create Subtitles
               ass_path = OUT / f"sub_{i}.ass"
               create_ass(narration.split(), dur, ass_path)
 
+              # SCENE RENDERING (Normalization Stage)
               s_p = SCENES_DIR / f"scene_{i:02d}.mp4"
               v_in = ["-stream_loop", "-1", "-i", str(v_p)] if is_video else ["-loop", "1", "-i", str(v_p)]
               
-              # STRICT SYNC: Force normalization of every stream
+              # Normalize every clip to exact same specs
               v_filt = (f"scale=1920:-1,crop=1080:1920:'(iw-ow)/2':'(ih-oh)/2-(ih-oh)/2*(t/{dur:.2f})',"
                         f"ass={ass_path},"
                         f"fps={FPS},format=yuv420p,"
@@ -142,17 +139,11 @@ jobs:
                            "-c:a", "aac", "-b:a", "128k", "-t", f"{dur:.6f}", str(s_p)], check=True)
               scene_files.append(s_p)
 
-          # FINAL CONCAT FILTER (More robust than demuxer for sync)
-          filter_complex = ""
-          for i in range(len(scene_files)):
-              filter_complex += f"[{i}:v][i:a]" if False else f"[{i}:v][{i}:a]" # Placeholder
+          # STABLE CONCAT (Demuxer Stage - 0% Crash Risk)
+          with open(OUT / "list.txt", "w") as f:
+              for s in scene_files: f.write(f"file '{s.resolve()}'\n")
           
-          # Build concat command
-          concat_cmd = ["ffmpeg", "-y"]
-          for s in scene_files: concat_cmd.extend(["-i", str(s)])
-          concat_cmd.extend(["-filter_complex", f"".join([f"[{i}:v][{i}:a]" for i in range(len(scene_files))]) + f"concat=n={len(scene_files)}:v=1:a=1[v][a]", 
-                             "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", str(OUT / "raw.mp4")])
-          subprocess.run(concat_cmd, check=True)
+          subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(OUT / "list.txt"), "-c", "copy", str(OUT / "raw.mp4")], check=True)
           
           # Final Mix with Background Music
           if os.path.exists("bg_music.mp3") and os.path.getsize("bg_music.mp3") > 0:
