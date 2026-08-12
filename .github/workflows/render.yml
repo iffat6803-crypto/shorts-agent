@@ -53,7 +53,7 @@ jobs:
         run: |
           set -euo pipefail
           
-          # Download Suspenseful Background Music
+          # Download Background Music
           wget -O bg_music.mp3 "https://www.chosic.com/wp-content/uploads/2021/04/The-Enigma-TNG-The-Deep-Web.mp3" || touch bg_music.mp3
 
           cat > render.py <<'PY'
@@ -88,7 +88,6 @@ jobs:
                   return dest, False
 
           def create_ass(words, dur, output_path):
-              # Industry Standard ASS format for word-level highlighting
               header = (
                   "[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n\n"
                   "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
@@ -103,7 +102,6 @@ jobs:
                       start_ts = f"{int(current_time//3600):01}:{int((current_time%3600)//60):02}:{current_time%60:05.2f}"
                       end_time = current_time + word_dur
                       end_ts = f"{int(end_time//3600):01}:{int((end_time%3600)//60):02}:{end_time%60:05.2f}"
-                      # Word Pop effect: Yellow highlight for current word
                       f.write(f"Dialogue: 0,{start_ts},{end_ts},Default,,0,0,0,,{{\\k{int(word_dur*100)}}}{word.upper()}\n")
                       current_time = end_time
 
@@ -116,42 +114,50 @@ jobs:
           for i, item in enumerate(visuals):
               url = item.get("video_url") or item.get("image_url") or item.get("url")
               narration = item.get("narration") or item.get("text")
-              
               v_p, is_video = download_visual(url, OUT / f"source_{i}")
               
-              # Audio Generation
               chunks = [np.asarray(c, dtype=np.float32).reshape(-1) for _, _, c in pipeline(narration, voice="af_heart", speed=1.1)]
               sf.write(OUT / "temp.wav", np.concatenate(chunks), SAMPLE_RATE)
               wav_path = OUT / f"section_{i}.wav"
               subprocess.run(["ffmpeg", "-y", "-i", str(OUT / "temp.wav"), "-ar", str(OUTPUT_AUDIO_RATE), "-ac", "1", str(wav_path)], check=True)
               dur = get_duration(wav_path)
 
-              # Subtitles
               ass_path = OUT / f"sub_{i}.ass"
               create_ass(narration.split(), dur, ass_path)
 
-              # RENDERING (Strict Sync & Pro Filters)
               s_p = SCENES_DIR / f"scene_{i:02d}.mp4"
               v_in = ["-stream_loop", "-1", "-i", str(v_p)] if is_video else ["-loop", "1", "-i", str(v_p)]
               
+              # STRICT SYNC: Force normalization of every stream
               v_filt = (f"scale=1920:-1,crop=1080:1920:'(iw-ow)/2':'(ih-oh)/2-(ih-oh)/2*(t/{dur:.2f})',"
                         f"ass={ass_path},"
+                        f"fps={FPS},format=yuv420p,"
                         f"tpad=stop_mode=clone:stop_duration={dur:.6f},trim=duration={dur:.6f},setpts=PTS-STARTPTS")
               
-              subprocess.run(["ffmpeg", "-y", *v_in, "-i", str(wav_path), "-filter_complex", f"[0:v]{v_filt}[v];[1:a]asetpts=PTS-STARTPTS,aresample=48000:async=1:first_pts=0,apad=pad_dur={dur:.6f},atrim=duration={dur:.6f},asetpts=PTS-STARTPTS[a]", 
+              a_filt = (f"aresample={OUTPUT_AUDIO_RATE},pan=mono|c0=c0,"
+                        f"apad=pad_dur={dur:.6f},atrim=duration={dur:.6f},asetpts=PTS-STARTPTS")
+              
+              subprocess.run(["ffmpeg", "-y", *v_in, "-i", str(wav_path), "-filter_complex", f"[0:v]{v_filt}[v];[1:a]{a_filt}[a]", 
                            "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24", 
-                           "-pix_fmt", "yuv420p", "-c:a", "aac", "-t", f"{dur:.6f}", str(s_p)], check=True)
+                           "-c:a", "aac", "-b:a", "128k", "-t", f"{dur:.6f}", str(s_p)], check=True)
               scene_files.append(s_p)
 
-          # Final Concat
-          with open(OUT / "list.txt", "w") as f:
-              for s in scene_files: f.write(f"file '{s.resolve()}'\n")
-          subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(OUT / "list.txt"), "-c", "copy", OUT / "raw.mp4"], check=True)
+          # FINAL CONCAT FILTER (More robust than demuxer for sync)
+          filter_complex = ""
+          for i in range(len(scene_files)):
+              filter_complex += f"[{i}:v][i:a]" if False else f"[{i}:v][{i}:a]" # Placeholder
+          
+          # Build concat command
+          concat_cmd = ["ffmpeg", "-y"]
+          for s in scene_files: concat_cmd.extend(["-i", str(s)])
+          concat_cmd.extend(["-filter_complex", f"".join([f"[{i}:v][{i}:a]" for i in range(len(scene_files))]) + f"concat=n={len(scene_files)}:v=1:a=1[v][a]", 
+                             "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", str(OUT / "raw.mp4")])
+          subprocess.run(concat_cmd, check=True)
           
           # Final Mix with Background Music
           if os.path.exists("bg_music.mp3") and os.path.getsize("bg_music.mp3") > 0:
               subprocess.run(["ffmpeg", "-y", "-i", str(OUT / "raw.mp4"), "-stream_loop", "-1", "-i", "bg_music.mp3", 
-                              "-filter_complex", "[1:a]volume=0.15[bg];[0:a][bg]amix=inputs=2:duration=first[a]", 
+                              "-filter_complex", "[1:a]volume=0.12[bg];[0:a][bg]amix=inputs=2:duration=first[a]", 
                               "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "final.mp4"], check=True)
           else:
               os.rename(OUT / "raw.mp4", "final.mp4")
