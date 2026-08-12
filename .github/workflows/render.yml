@@ -109,6 +109,7 @@ jobs:
           print("soundfile:", soundfile.__version__)
           print("torch:", torch.__version__)
           print("kokoro:", getattr(kokoro, "__version__", "installed"))
+          print("Python package verification: PASSED")
           PY
 
 
@@ -185,7 +186,6 @@ jobs:
 
           MIN_DURATION = 30.0
           MAX_DURATION = 60.0
-
           TARGET_MAX = 59.5
 
           SCENE_TOLERANCE = 0.20
@@ -230,6 +230,7 @@ jobs:
 
               try:
                   return float(result)
+
               except ValueError:
                   fail(
                       "ffprobe returned invalid numeric value: "
@@ -418,6 +419,7 @@ jobs:
                   )
 
                   if content_length:
+
                       try:
                           content_length = int(
                               content_length
@@ -444,6 +446,7 @@ jobs:
                   ) as output:
 
                       while True:
+
                           chunk = response.read(
                               1024 * 1024
                           )
@@ -620,9 +623,8 @@ jobs:
 
               if normalized_url in seen_urls:
                   fail(
-                      "DUPLICATE VISUAL DETECTED. "
-                      "The same canonical visual URL was supplied "
-                      f"more than once: {normalized_url}"
+                      "DUPLICATE VISUAL DETECTED: "
+                      + normalized_url
                   )
 
               seen_urls.add(
@@ -636,9 +638,10 @@ jobs:
 
 
               if visual_id:
+
                   if visual_id in seen_visual_ids:
                       fail(
-                          "DUPLICATE VISUAL ASSET ID DETECTED: "
+                          "DUPLICATE VISUAL ASSET ID: "
                           + visual_id
                       )
 
@@ -714,8 +717,8 @@ jobs:
 
           if actual_indexes != expected_indexes:
               fail(
-                  "section_index values must be "
-                  "sequential starting at 0. "
+                  "section_index values must be sequential "
+                  "starting at 0. "
                   f"Received: {actual_indexes}"
               )
 
@@ -746,8 +749,7 @@ jobs:
 
               print("")
               print(
-                  f"Downloading visual for "
-                  f"section {index + 1}..."
+                  f"Downloading visual for section {index + 1}..."
               )
 
 
@@ -787,6 +789,7 @@ jobs:
                               OUT /
                               f"source_{index}.jpg"
                           )
+
                       else:
                           final_path = (
                               OUT /
@@ -860,8 +863,7 @@ jobs:
 
                       print(
                           f"Section {index + 1}: "
-                          f"download attempt "
-                          f"{attempt} failed: {exc}"
+                          f"download attempt {attempt} failed: {exc}"
                       )
 
 
@@ -876,8 +878,8 @@ jobs:
               section_inputs
           ):
               fail(
-                  "Every narration section must "
-                  "have exactly one visual"
+                  "Every narration section must have "
+                  "exactly one visual"
               )
 
 
@@ -913,8 +915,7 @@ jobs:
 
 
               print(
-                  f"Generating audio for "
-                  f"section {index + 1}..."
+                  f"Generating audio for section {index + 1}..."
               )
 
 
@@ -1448,12 +1449,9 @@ jobs:
               )
 
 
-              if scene_av_diff > (
-                  SCENE_TOLERANCE
-              ):
+              if scene_av_diff > SCENE_TOLERANCE:
                   fail(
-                      f"SCENE {index + 1} A/V "
-                      "MISMATCH: "
+                      f"SCENE {index + 1} A/V MISMATCH: "
                       f"video={scene_video_duration:.6f}s "
                       f"audio={scene_audio_duration:.6f}s "
                       f"difference={scene_av_diff:.6f}s"
@@ -1466,8 +1464,8 @@ jobs:
                   scene_audio_duration
               ) > SCENE_TOLERANCE:
                   fail(
-                      f"SCENE {index + 1} CONTAINER "
-                      "TIMELINE MISMATCH: "
+                      f"SCENE {index + 1} CONTAINER TIMELINE "
+                      "MISMATCH: "
                       f"container={scene_container_duration:.6f}s "
                       f"audio={scene_audio_duration:.6f}s"
                   )
@@ -1501,9 +1499,7 @@ jobs:
               for scene in scene_files:
 
                   safe_path = (
-                      str(
-                          scene.resolve()
-                      )
+                      str(scene.resolve())
                       .replace(
                           "'",
                           "'\\''"
@@ -1512,10 +1508,8 @@ jobs:
 
                   f.write(
                       "file '"
-                      +
-                      safe_path
-                      +
-                      "'\n"
+                      + safe_path
+                      + "'\n"
                   )
 
 
@@ -1583,6 +1577,13 @@ jobs:
           )
 
 
+          base_av_diff = abs(
+              base_video_duration
+              -
+              base_audio_duration
+          )
+
+
           print("")
           print(
               "================================================"
@@ -1594,33 +1595,20 @@ jobs:
               "================================================"
           )
 
-
           print(
-              f"Base video duration: "
-              f"{base_video_duration:.6f}s"
+              f"Base video duration: {base_video_duration:.6f}s"
           )
 
           print(
-              f"Base audio duration: "
-              f"{base_audio_duration:.6f}s"
+              f"Base audio duration: {base_audio_duration:.6f}s"
           )
 
           print(
-              f"Base container duration: "
-              f"{base_duration:.6f}s"
+              f"Base container duration: {base_duration:.6f}s"
           )
 
 
-          base_av_diff = abs(
-              base_video_duration
-              -
-              base_audio_duration
-          )
-
-
-          if base_av_diff > (
-              FINAL_TOLERANCE
-          ):
+          if base_av_diff > FINAL_TOLERANCE:
               fail(
                   "MASTER A/V MISMATCH: "
                   f"video={base_video_duration:.6f}s "
@@ -1659,9 +1647,7 @@ jobs:
           def timestamp(seconds):
 
               total_ms = int(
-                  round(
-                      seconds * 1000
-                  )
+                  round(seconds * 1000)
               )
 
               hours, remainder = divmod(
@@ -1770,9 +1756,7 @@ jobs:
                   actual_scene_durations
               ):
 
-                  section_start = (
-                      current_time
-                  )
+                  section_start = current_time
 
                   section_end = (
                       section_start
@@ -1805,10 +1789,7 @@ jobs:
                       )
 
                       weights.append(
-                          max(
-                              1,
-                              count
-                          )
+                          max(1, count)
                       )
 
 
@@ -1817,9 +1798,7 @@ jobs:
                   )
 
 
-                  local_time = (
-                      section_start
-                  )
+                  local_time = section_start
 
 
                   for part, weight in zip(
@@ -1836,15 +1815,11 @@ jobs:
                       )
 
 
-                      start = (
-                          local_time
-                      )
+                      start = local_time
 
                       end = min(
                           section_end,
-                          local_time
-                          +
-                          part_duration
+                          local_time + part_duration
                       )
 
 
@@ -1861,9 +1836,7 @@ jobs:
                       local_time = end
 
 
-                  current_time = (
-                      section_end
-                  )
+                  current_time = section_end
 
 
           # ======================================================
@@ -1982,6 +1955,40 @@ jobs:
           )
 
 
+          fps_check = subprocess.check_output(
+              [
+                  "ffprobe",
+                  "-v",
+                  "error",
+                  "-select_streams",
+                  "v:0",
+                  "-show_entries",
+                  "stream=r_frame_rate",
+                  "-of",
+                  "default=noprint_wrappers=1:nokey=1",
+                  str(final)
+              ],
+              text=True
+          ).strip()
+
+
+          audio_channels = subprocess.check_output(
+              [
+                  "ffprobe",
+                  "-v",
+                  "error",
+                  "-select_streams",
+                  "a:0",
+                  "-show_entries",
+                  "stream=channels",
+                  "-of",
+                  "default=noprint_wrappers=1:nokey=1",
+                  str(final)
+              ],
+              text=True
+          ).strip()
+
+
           print("")
           print(
               "================================================"
@@ -1993,35 +2000,36 @@ jobs:
               "================================================"
           )
 
-
           print(
-              f"Final container: "
-              f"{final_duration:.6f}s"
+              f"Final container: {final_duration:.6f}s"
           )
 
           print(
-              f"Final video stream: "
-              f"{video_duration:.6f}s"
+              f"Final video stream: {video_duration:.6f}s"
           )
 
           print(
-              f"Final audio stream: "
-              f"{audio_duration:.6f}s"
+              f"Final audio stream: {audio_duration:.6f}s"
           )
 
           print(
-              f"Final A/V difference: "
-              f"{final_av_diff:.6f}s"
+              f"Final A/V difference: {final_av_diff:.6f}s"
           )
 
           print(
-              f"Sections: "
-              f"{len(section_audio)}"
+              f"Sections: {len(section_audio)}"
           )
 
           print(
-              f"File size: "
-              f"{size} bytes"
+              f"File size: {size} bytes"
+          )
+
+          print(
+              f"Final FPS: {fps_check}"
+          )
+
+          print(
+              f"Final audio channels: {audio_channels}"
           )
 
 
@@ -2043,9 +2051,7 @@ jobs:
               )
 
 
-          if final_av_diff > (
-              FINAL_TOLERANCE
-          ):
+          if final_av_diff > FINAL_TOLERANCE:
               fail(
                   "FINAL A/V MISMATCH: "
                   f"video={video_duration:.6f}s "
@@ -2054,55 +2060,11 @@ jobs:
               )
 
 
-          fps_check = subprocess.check_output(
-              [
-                  "ffprobe",
-                  "-v",
-                  "error",
-                  "-select_streams",
-                  "v:0",
-                  "-show_entries",
-                  "stream=r_frame_rate",
-                  "-of",
-                  "default=noprint_wrappers=1:nokey=1",
-                  str(final)
-              ],
-              text=True
-          ).strip()
-
-
-          print(
-              f"Final FPS: {fps_check}"
-          )
-
-
           if fps_check != "30/1":
               fail(
                   "FINAL VIDEO IS NOT 30 FPS: "
                   + fps_check
               )
-
-
-          audio_channels = subprocess.check_output(
-              [
-                  "ffprobe",
-                  "-v",
-                  "error",
-                  "-select_streams",
-                  "a:0",
-                  "-show_entries",
-                  "stream=channels",
-                  "-of",
-                  "default=noprint_wrappers=1:nokey=1",
-                  str(final)
-              ],
-              text=True
-          ).strip()
-
-
-          print(
-              f"Final audio channels: {audio_channels}"
-          )
 
 
           if audio_channels != "1":
@@ -2173,9 +2135,12 @@ jobs:
           import os
 
 
+          # ======================================================
+          # REQUIRED CONFIG
+          # ======================================================
+
           required = [
               "GDRIVE_SERVICE_ACCOUNT_JSON",
-              "GDRIVE_FOLDER_ID",
               "GOOGLE_SHEET_ID"
           ]
 
@@ -2188,10 +2153,18 @@ jobs:
 
 
           if missing:
+
               print("")
-              print("================================================")
-              print("GOOGLE CONFIGURATION ERROR")
-              print("================================================")
+              print(
+                  "================================================"
+              )
+              print(
+                  "GOOGLE CONFIGURATION ERROR"
+              )
+              print(
+                  "================================================"
+              )
+
               print(
                   "Missing required GitHub Actions secrets:"
               )
@@ -2199,20 +2172,9 @@ jobs:
               for name in missing:
                   print(" - " + name)
 
-              print("")
               print(
-                  "Add these secrets in:"
+                  "================================================"
               )
-              print(
-                  "GitHub repository -> Settings -> Secrets and variables -> Actions"
-              )
-              print("")
-              print(
-                  "The video renderer itself completed, "
-                  "but Drive/Sheets upload cannot continue "
-                  "until these secrets exist."
-              )
-              print("================================================")
 
               raise SystemExit(1)
 
@@ -2229,6 +2191,10 @@ jobs:
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaFileUpload
 
+
+          # ======================================================
+          # SERVICE ACCOUNT
+          # ======================================================
 
           try:
 
@@ -2276,28 +2242,57 @@ jobs:
           )
 
 
+          # ======================================================
+          # INPUTS
+          # ======================================================
+
           run_id = os.environ["RUN_ID"]
           topic = os.environ["TOPIC"]
           title = os.environ["TITLE"]
 
+          folder_id = (
+              os.environ.get(
+                  "GDRIVE_FOLDER_ID",
+                  ""
+              ).strip()
+          )
 
-          folder_id = os.environ[
-              "GDRIVE_FOLDER_ID"
-          ]
+          spreadsheet_id = (
+              os.environ["GOOGLE_SHEET_ID"]
+              .strip()
+          )
 
 
-          spreadsheet_id = os.environ[
-              "GOOGLE_SHEET_ID"
-          ]
-
+          # ======================================================
+          # DRIVE UPLOAD
+          # ======================================================
 
           metadata = {
               "name": f"{run_id}.mp4",
-              "parents": [
-                  folder_id
-              ],
               "mimeType": "video/mp4"
           }
+
+
+          # Folder ID is OPTIONAL.
+          # If empty, upload goes to service-account Drive root.
+
+          if folder_id:
+              metadata["parents"] = [
+                  folder_id
+              ]
+
+              print(
+                  "Using configured Google Drive folder."
+              )
+
+          else:
+              print(
+                  "GDRIVE_FOLDER_ID not provided."
+              )
+
+              print(
+                  "Uploading to service-account Drive root."
+              )
 
 
           media = MediaFileUpload(
@@ -2333,9 +2328,9 @@ jobs:
           )
 
 
-          # ------------------------------------------------------
+          # ======================================================
           # PUBLIC READ ACCESS
-          # ------------------------------------------------------
+          # ======================================================
 
           try:
 
@@ -2349,23 +2344,20 @@ jobs:
               ).execute()
 
               print(
-                  "Drive public sharing succeeded"
+                  "Drive public sharing succeeded."
               )
 
           except Exception as exc:
 
               print(
-                  "WARNING: Could not make Drive file public:"
+                  "WARNING: Could not make Drive file public."
               )
 
               print(exc)
 
               print(
-                  "The file was uploaded successfully, "
-                  "but public sharing failed."
+                  "Upload itself succeeded."
               )
-
-              raise
 
 
           link = (
@@ -2374,14 +2366,15 @@ jobs:
           )
 
 
-          # ------------------------------------------------------
+          # ======================================================
           # GOOGLE SHEETS
-          # ------------------------------------------------------
+          # ======================================================
 
           sheet_range = (
               os.environ.get(
-                  "GOOGLE_SHEET_RANGE"
-              )
+                  "GOOGLE_SHEET_RANGE",
+                  ""
+              ).strip()
               or
               "Sheet1!A:F"
           )
@@ -2426,13 +2419,13 @@ jobs:
 
 
           print(
-              "Google Sheets append succeeded"
+              "Google Sheets append succeeded."
           )
 
 
-          # ------------------------------------------------------
-          # MACHINE-READABLE SUCCESS OUTPUT
-          # ------------------------------------------------------
+          # ======================================================
+          # MACHINE READABLE OUTPUT
+          # ======================================================
 
           print("")
           print(
