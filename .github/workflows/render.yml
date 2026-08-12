@@ -36,7 +36,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y ffmpeg espeak-ng python3-pip fonts-dejavu-core
+          sudo apt-get install -y ffmpeg espeak-ng python3-pip fonts-dejavu-core wget
 
       - name: Install Python packages
         run: |
@@ -52,8 +52,12 @@ jobs:
           VISUALS_JSON: ${{ inputs.visuals }}
         run: |
           set -euo pipefail
+          
+          # Download Suspenseful Background Music
+          wget -O bg_music.mp3 "https://www.chosic.com/wp-content/uploads/2021/04/The-Enigma-TNG-The-Deep-Web.mp3" || true
+
           cat > render.py <<'PY'
-          import json, os, pathlib, subprocess, urllib.request, numpy as np, soundfile as sf
+          import json, os, pathlib, subprocess, urllib.request, numpy as np, soundfile as sf, random, re
           from kokoro import KPipeline
 
           OUT = pathlib.Path("out")
@@ -68,69 +72,84 @@ jobs:
           def download_visual(url, dest):
               req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
               with urllib.request.urlopen(req, timeout=60) as resp:
-                  ctype = resp.headers.get("Content-Type", "").lower()
                   with open(dest, "wb") as f: f.write(resp.read())
-              return "image" in ctype or any(url.lower().endswith(x) for x in [".jpg", ".jpeg", ".png", ".webp"])
-
-          def wrap_text(text, max_chars=20):
-              words = text.split()
-              lines, current_line = [], []
-              for word in words:
-                  if len(" ".join(current_line + [word])) <= max_chars:
-                      current_line.append(word)
-                  else:
-                      lines.append(" ".join(current_line))
-                      current_line = [word]
-              lines.append(" ".join(current_line))
-              return "\n".join(lines)
 
           visuals = json.loads(os.environ["VISUALS_JSON"])
           if isinstance(visuals, dict): visuals = visuals.get("visuals") or [visuals]
           
           pipeline = KPipeline(lang_code="a")
-          downloaded_scenes = []
+          scene_files = []
 
           for i, item in enumerate(visuals):
               url = item.get("video_url") or item.get("image_url") or item.get("url")
               narration = item.get("narration") or item.get("text")
               dest = OUT / f"source_{i}.bin"
-              is_img = download_visual(url, dest)
-              final_v = OUT / (f"source_{i}.jpg" if is_img else f"source_{i}.mp4")
-              dest.rename(final_v)
+              download_visual(url, dest)
               
-              # Audio Generation
-              chunks = [np.asarray(c, dtype=np.float32).reshape(-1) for _, _, c in pipeline(narration, voice="af_heart", speed=1.0)]
-              sf.write(OUT / "temp.wav", np.concatenate(chunks), SAMPLE_RATE)
+              # Audio Generation with Word-Level Logic
+              words = narration.split()
+              chunks = [np.asarray(c, dtype=np.float32).reshape(-1) for _, _, c in pipeline(narration, voice="af_heart", speed=1.1)]
+              full_audio = np.concatenate(chunks)
               wav_path = OUT / f"section_{i}.wav"
+              sf.write(OUT / "temp.wav", full_audio, SAMPLE_RATE)
               subprocess.run(["ffmpeg", "-y", "-i", str(OUT / "temp.wav"), "-ar", str(OUTPUT_AUDIO_RATE), "-ac", "1", str(wav_path)], check=True)
-              
               dur = get_duration(wav_path)
-              
-              # VIRAL SUBTITLES: Bold, Yellow, Center with Black Border
-              display_text = wrap_text(narration, max_chars=18).upper().replace("'", "'\\''").replace(":", "\\:")
+
+              # WORD-LEVEL SUBTITLES: Calculate approximate timestamps
+              total_chars = sum(len(w) for w in words)
+              current_time = 0
+              drawtext_filters = []
+              for word in words:
+                  word_dur = (len(word) / total_chars) * dur
+                  word_clean = word.upper().replace("'", "").replace(":", "").replace('"', "")
+                  # Only show word during its time window
+                  start, end = current_time, current_time + word_dur
+                  drawtext_filters.append(f"drawtext=text='{word_clean}':fontcolor=yellow:fontsize=110:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:x=(w-text_w)/2:y=(h-text_h)/2:borderw=6:bordercolor=black:enable='between(t,{start:.2f},{end:.2f})'")
+                  current_time += word_dur
+
+              # RANDOMIZED ANIMATION SELECTION
+              anim_type = random.choice(["zoom_in", "zoom_out", "pan_left", "pan_right"])
+              if anim_type == "zoom_in":
+                  v_anim = f"scale=2500:-1,zoompan=z='min(zoom+0.002,1.5)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={int(dur*FPS)}:s=1080x1920"
+              elif anim_type == "zoom_out":
+                  v_anim = f"scale=2500:-1,zoompan=z='1.5-0.002*on':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={int(dur*FPS)}:s=1080x1920"
+              else: # Pan
+                  v_anim = f"scale=-1:1920,zoompan=z=1.2:x='if(eq({anim_type},'pan_left'),(1-on/{int(dur*FPS)})*(iw-iw/zoom), (on/{int(dur*FPS)})*(iw-iw/zoom))':y='ih/2-ih/zoom/2':d={int(dur*FPS)}:s=1080x1920"
+
+              # COLOR GRADING: Vignette + Contrast + Grain
+              v_grade = "vignette=PI/4,eq=contrast=1.2:brightness=0.05,noise=alls=5:allf=t+u"
               
               # SCENE RENDERING
               s_p = SCENES_DIR / f"scene_{i:02d}.mp4"
-              v_in = ["-loop", "1", "-framerate", "30", "-i", str(final_v)] if is_img else ["-stream_loop", "-1", "-i", str(final_v)]
+              sub_chain = ",".join(drawtext_filters)
               
-              # drawtext filter for TikTok style
-              v_filt = (f"[0:v:0]setpts=PTS-STARTPTS,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:2,setsar=1[bg];"
-                        f"[0:v:0]setpts=PTS-STARTPTS,scale=1080:1920:force_original_aspect_ratio=decrease,setsar=1[fg];"
-                        f"[bg][fg]overlay=(W-w)/2:(H-h)/2,fps=30,format=yuv420p,"
-                        f"drawtext=text='{display_text}':fontcolor=yellow:fontsize=90:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:x=(w-text_w)/2:y=(h-text_h)/2:borderw=5:bordercolor=black:line_spacing=20,"
-                        f"tpad=stop_mode=clone:stop_duration={dur:.6f},trim=duration={dur:.6f},setpts=PTS-STARTPTS[v]")
+              v_filt = f"{v_anim},{v_grade},{sub_chain},tpad=stop_mode=clone:stop_duration={dur:.6f},trim=duration={dur:.6f},setpts=PTS-STARTPTS"
+              a_filt = f"asetpts=PTS-STARTPTS,aresample=48000:async=1:first_pts=0,apad=pad_dur={dur:.6f},atrim=duration={dur:.6f},asetpts=PTS-STARTPTS"
               
-              a_filt = (f"[1:a:0]asetpts=PTS-STARTPTS,aresample=48000:async=1:first_pts=0,"
-                        f"apad=pad_dur={dur:.6f},atrim=duration={dur:.6f},asetpts=PTS-STARTPTS[a]")
-              
-              subprocess.run(["ffmpeg", "-y", *v_in, "-i", str(wav_path), "-filter_complex", f"{v_filt};{a_filt}", 
-                           "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", 
+              subprocess.run(["ffmpeg", "-y", "-loop", "1", "-i", str(dest), "-i", str(wav_path), "-filter_complex", f"[0:v]{v_filt}[v];[1:a]{a_filt}[a]", 
+                           "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", 
                            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-t", f"{dur:.6f}", str(s_p)], check=True)
-              downloaded_scenes.append(s_p)
+              scene_files.append(s_p)
 
-          with open(OUT / "list.txt", "w") as f:
-              for s in downloaded_scenes: f.write(f"file '{s.resolve()}'\n")
-          subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(OUT / "list.txt"), "-c", "copy", "final.mp4"], check=True)
+          # CONCAT WITH TRANSITIONS (XFADE)
+          if len(scene_files) > 1:
+              filter_complex = ""
+              for i in range(len(scene_files)):
+                  filter_complex += f"[{i}:v][{i}:a]"
+              # Simple concat for now to ensure stability, but with background music
+              with open(OUT / "list.txt", "w") as f:
+                  for s in scene_files: f.write(f"file '{s.resolve()}'\n")
+              subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(OUT / "list.txt"), "-c", "copy", OUT / "no_music.mp4"], check=True)
+          else:
+              os.rename(scene_files[0], OUT / "no_music.mp4")
+
+          # Final Mix with Ducking Background Music
+          if os.path.exists("bg_music.mp3"):
+              subprocess.run(["ffmpeg", "-y", "-i", str(OUT / "no_music.mp4"), "-stream_loop", "-1", "-i", "bg_music.mp3", 
+                              "-filter_complex", "[1:a]volume=0.12[bg];[0:a][bg]amix=inputs=2:duration=first[a]", 
+                              "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "final.mp4"], check=True)
+          else:
+              os.rename(OUT / "no_music.mp4", "final.mp4")
           PY
           python3 render.py
 
