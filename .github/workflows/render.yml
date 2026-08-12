@@ -28,7 +28,6 @@ on:
         required: true
         type: string
 
-
 jobs:
   render:
     runs-on: ubuntu-latest
@@ -244,9 +243,7 @@ jobs:
                       "-show_entries",
                       "format=duration",
                       "-of",
-                      "default="
-                      "noprint_wrappers=1:"
-                      "nokey=1",
+                      "default=noprint_wrappers=1:nokey=1",
                       str(path)
                   ]
               )
@@ -260,9 +257,7 @@ jobs:
                       "-show_entries",
                       "stream=duration",
                       "-of",
-                      "default="
-                      "noprint_wrappers=1:"
-                      "nokey=1",
+                      "default=noprint_wrappers=1:nokey=1",
                       str(path)
                   ]
               )
@@ -276,9 +271,7 @@ jobs:
                       "-show_entries",
                       "stream=duration",
                       "-of",
-                      "default="
-                      "noprint_wrappers=1:"
-                      "nokey=1",
+                      "default=noprint_wrappers=1:nokey=1",
                       str(path)
                   ]
               )
@@ -443,7 +436,6 @@ jobs:
                       except ValueError:
                           pass
 
-
                   total = 0
 
                   with open(
@@ -479,7 +471,6 @@ jobs:
                               )
 
                           output.write(chunk)
-
 
               if not destination.exists():
                   fail(
@@ -2073,9 +2064,7 @@ jobs:
                   "-show_entries",
                   "stream=r_frame_rate",
                   "-of",
-                  "default="
-                  "noprint_wrappers=1:"
-                  "nokey=1",
+                  "default=noprint_wrappers=1:nokey=1",
                   str(final)
               ],
               text=True
@@ -2104,9 +2093,7 @@ jobs:
                   "-show_entries",
                   "stream=channels",
                   "-of",
-                  "default="
-                  "noprint_wrappers=1:"
-                  "nokey=1",
+                  "default=noprint_wrappers=1:nokey=1",
                   str(final)
               ],
               text=True
@@ -2114,8 +2101,7 @@ jobs:
 
 
           print(
-              f"Final audio channels: "
-              f"{audio_channels}"
+              f"Final audio channels: {audio_channels}"
           )
 
 
@@ -2160,16 +2146,7 @@ jobs:
 
 
       # ==========================================================
-      # GOOGLE DRIVE + SHEETS
-      #
-      # IMPORTANT:
-      # This step runs ONLY when render succeeded.
-      # Missing credentials are a HARD FAILURE.
-      # Drive upload failure is a HARD FAILURE.
-      # Sheets failure is a HARD FAILURE.
-      #
-      # This is required so n8n does NOT log history unless
-      # the actual Drive + Sheets success path completed.
+      # GOOGLE DRIVE + GOOGLE SHEETS
       # ==========================================================
 
       - name: Upload MP4 to Google Drive and append Sheet row
@@ -2211,10 +2188,33 @@ jobs:
 
 
           if missing:
-              raise SystemExit(
-                  "ERROR: Missing required Google secrets: "
-                  + ", ".join(missing)
+              print("")
+              print("================================================")
+              print("GOOGLE CONFIGURATION ERROR")
+              print("================================================")
+              print(
+                  "Missing required GitHub Actions secrets:"
               )
+
+              for name in missing:
+                  print(" - " + name)
+
+              print("")
+              print(
+                  "Add these secrets in:"
+              )
+              print(
+                  "GitHub repository -> Settings -> Secrets and variables -> Actions"
+              )
+              print("")
+              print(
+                  "The video renderer itself completed, "
+                  "but Drive/Sheets upload cannot continue "
+                  "until these secrets exist."
+              )
+              print("================================================")
+
+              raise SystemExit(1)
 
 
           if not os.path.exists(
@@ -2230,15 +2230,28 @@ jobs:
           from googleapiclient.http import MediaFileUpload
 
 
+          try:
+
+              service_account_info = json.loads(
+                  os.environ[
+                      "GDRIVE_SERVICE_ACCOUNT_JSON"
+                  ]
+              )
+
+          except json.JSONDecodeError as exc:
+
+              raise SystemExit(
+                  "ERROR: GDRIVE_SERVICE_ACCOUNT_JSON "
+                  "is not valid JSON: "
+                  + str(exc)
+              )
+
+
           credentials = (
               service_account
               .Credentials
               .from_service_account_info(
-                  json.loads(
-                      os.environ[
-                          "GDRIVE_SERVICE_ACCOUNT_JSON"
-                      ]
-                  ),
+                  service_account_info,
                   scopes=[
                       "https://www.googleapis.com/auth/drive",
                       "https://www.googleapis.com/auth/spreadsheets"
@@ -2268,10 +2281,20 @@ jobs:
           title = os.environ["TITLE"]
 
 
+          folder_id = os.environ[
+              "GDRIVE_FOLDER_ID"
+          ]
+
+
+          spreadsheet_id = os.environ[
+              "GOOGLE_SHEET_ID"
+          ]
+
+
           metadata = {
               "name": f"{run_id}.mp4",
               "parents": [
-                  os.environ["GDRIVE_FOLDER_ID"]
+                  folder_id
               ],
               "mimeType": "video/mp4"
           }
@@ -2285,7 +2308,9 @@ jobs:
           )
 
 
-          print("Uploading final-short.mp4 to Google Drive...")
+          print(
+              "Uploading final-short.mp4 to Google Drive..."
+          )
 
 
           uploaded = (
@@ -2312,24 +2337,40 @@ jobs:
           # PUBLIC READ ACCESS
           # ------------------------------------------------------
 
-          drive.permissions().create(
-              fileId=file_id,
-              body={
-                  "type": "anyone",
-                  "role": "reader"
-              },
-              fields="id"
-          ).execute()
+          try:
+
+              drive.permissions().create(
+                  fileId=file_id,
+                  body={
+                      "type": "anyone",
+                      "role": "reader"
+                  },
+                  fields="id"
+              ).execute()
+
+              print(
+                  "Drive public sharing succeeded"
+              )
+
+          except Exception as exc:
+
+              print(
+                  "WARNING: Could not make Drive file public:"
+              )
+
+              print(exc)
+
+              print(
+                  "The file was uploaded successfully, "
+                  "but public sharing failed."
+              )
+
+              raise
 
 
           link = (
               f"https://drive.google.com/file/d/"
               f"{file_id}/view"
-          )
-
-
-          print(
-              "Drive public sharing succeeded"
           )
 
 
@@ -2372,9 +2413,7 @@ jobs:
               sheets.spreadsheets()
               .values()
               .append(
-                  spreadsheetId=os.environ[
-                      "GOOGLE_SHEET_ID"
-                  ],
+                  spreadsheetId=spreadsheet_id,
                   range=sheet_range,
                   valueInputOption="USER_ENTERED",
                   insertDataOption="INSERT_ROWS",
@@ -2418,10 +2457,6 @@ jobs:
 
       # ==========================================================
       # GITHUB ARTIFACT BACKUP
-      #
-      # Always runs, including failed renders.
-      # This lets us inspect intermediate files when something
-      # fails.
       # ==========================================================
 
       - name: Upload GitHub artifact backup
