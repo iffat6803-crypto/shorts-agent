@@ -36,7 +36,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y ffmpeg espeak-ng python3-pip
+          sudo apt-get install -y ffmpeg espeak-ng python3-pip fonts-dejavu-core
 
       - name: Install Python packages
         run: |
@@ -72,7 +72,7 @@ jobs:
                   with open(dest, "wb") as f: f.write(resp.read())
               return "image" in ctype or any(url.lower().endswith(x) for x in [".jpg", ".jpeg", ".png", ".webp"])
 
-          def wrap_text(text, max_chars=30):
+          def wrap_text(text, max_chars=20):
               words = text.split()
               lines, current_line = [], []
               for word in words:
@@ -106,18 +106,18 @@ jobs:
               
               dur = get_duration(wav_path)
               
-              # SUBTITLES: Wrap text and escape for FFmpeg
-              display_text = wrap_text(narration, max_chars=25).replace("'", "'\\''").replace(":", "\\:")
+              # VIRAL SUBTITLES: Bold, Yellow, Center with Black Border
+              display_text = wrap_text(narration, max_chars=18).upper().replace("'", "'\\''").replace(":", "\\:")
               
-              # SCENE RENDERING WITH SYNC AND IMPROVED SUBTITLES
+              # SCENE RENDERING
               s_p = SCENES_DIR / f"scene_{i:02d}.mp4"
               v_in = ["-loop", "1", "-framerate", "30", "-i", str(final_v)] if is_img else ["-stream_loop", "-1", "-i", str(final_v)]
               
-              # drawtext: Center-bottom placement, yellow/white text, black box for readability
+              # drawtext filter for TikTok style
               v_filt = (f"[0:v:0]setpts=PTS-STARTPTS,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:2,setsar=1[bg];"
                         f"[0:v:0]setpts=PTS-STARTPTS,scale=1080:1920:force_original_aspect_ratio=decrease,setsar=1[fg];"
                         f"[bg][fg]overlay=(W-w)/2:(H-h)/2,fps=30,format=yuv420p,"
-                        f"drawtext=text='{display_text}':fontcolor=yellow:fontsize=75:x=(w-text_w)/2:y=h-450:box=1:boxcolor=black@0.6:boxborderw=20:line_spacing=10,"
+                        f"drawtext=text='{display_text}':fontcolor=yellow:fontsize=90:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:x=(w-text_w)/2:y=(h-text_h)/2:borderw=5:bordercolor=black:line_spacing=20,"
                         f"tpad=stop_mode=clone:stop_duration={dur:.6f},trim=duration={dur:.6f},setpts=PTS-STARTPTS[v]")
               
               a_filt = (f"[1:a:0]asetpts=PTS-STARTPTS,aresample=48000:async=1:first_pts=0,"
